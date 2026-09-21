@@ -1,0 +1,21 @@
+{
+  "name": "kong-ai-switch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Switch Claude Code, Codex and Qwen CLI between models served by Kong AI Gateway 2.0",
+  "type": "module",
+  "bin": {
+    "kong-ai-switch": "./src/cli/index.js"
+  },
+  "scripts": {
+    "sync": "node src/cli/index.js sync",
+    "list": "node src/cli/index.js list",
+    "use": "node src/cli/index.js use",
+    "status": "node src/cli/index.js status",
+    "test": "node --test tests/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
