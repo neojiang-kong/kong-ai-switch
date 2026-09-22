@@ -584,8 +584,11 @@ struct MenuView: View {
     /// dead end in an app whose purpose is not having to use one.
     private var welcome: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Kong AI Switch")
-                .font(.headline)
+            HStack(spacing: 8) {
+                BrandMark(kind: .kong, size: 28)
+                Text("Kong AI Switch")
+                    .font(.headline)
+            }
             Text(
                 "Connect a Kong AI Gateway to switch Claude Code between the models your platform team publishes."
             )

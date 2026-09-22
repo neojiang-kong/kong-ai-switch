@@ -6,24 +6,73 @@
 # Dock icon or menu bar title of its own.
 set -euo pipefail
 
-CONFIG="${1:-debug}"
+CONFIG="${1:-release}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/build/KongAISwitch.app"
+
+# SwiftPM may emit either the classic `.build/<config>/` layout or the newer
+# `.build/out/Products/<Config>/` layout (capitalized Debug/Release).
+find_bin() {
+  local cfg="$1"
+  local capped
+  capped="$(printf '%s' "$cfg" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+  local candidates=(
+    "$ROOT/.build/out/Products/$capped/KongAISwitch"
+    "$ROOT/.build/$cfg/KongAISwitch"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [ -x "$c" ]; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_resource_bundle() {
+  local bin_dir
+  bin_dir="$(dirname "$1")"
+  local candidates=(
+    "$bin_dir/KongAISwitch_KongAISwitch.bundle"
+    "$ROOT/.build/out/Products/$(basename "$(dirname "$bin_dir")")/KongAISwitch_KongAISwitch.bundle"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [ -d "$c" ]; then
+      printf '%s' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
 
 echo "Building ($CONFIG) ..."
 cd "$ROOT"
 # SwiftPM can emit a benign build.db I/O warning; the binary is what matters.
 swift build -c "$CONFIG" 2>&1 | grep -viE "ld: warning: search path|build\.db|disk I/O" || true
 
-BIN="$ROOT/.build/$CONFIG/KongAISwitch"
-if [ ! -x "$BIN" ]; then
-  echo "Build failed: $BIN not found" >&2
+BIN="$(find_bin "$CONFIG" || true)"
+if [ -z "${BIN:-}" ]; then
+  echo "Build failed: KongAISwitch binary not found under .build/" >&2
   exit 1
 fi
+echo "  binary: $BIN"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/KongAISwitch"
+
+# Logo / attribution assets live in the SwiftPM resource bundle. Generated
+# Bundle.module looks in Bundle.main.resourceURL first — i.e. Contents/Resources/
+# inside an .app — not next to the Mach-O in Contents/MacOS.
+if BUNDLE="$(find_resource_bundle "$BIN")"; then
+  echo "  resources: $BUNDLE"
+  rm -rf "$APP/Contents/Resources/KongAISwitch_KongAISwitch.bundle"
+  cp -R "$BUNDLE" "$APP/Contents/Resources/KongAISwitch_KongAISwitch.bundle"
+else
+  echo "warning: KongAISwitch_KongAISwitch.bundle not found; logos will fall back to SF Symbols" >&2
+fi
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,8 +101,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>
+</plist>
 PLIST
-echo '</plist>' >> "$APP/Contents/Info.plist"
 
 # Install the CLI where the app can actually read it.
 #

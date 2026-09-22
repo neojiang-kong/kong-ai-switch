@@ -17,10 +17,13 @@ struct KongAISwitchApp: App {
             // wide display, where the menu bar can be several feet across.
             // The label also shows which model is active, so the common
             // question is answered without opening the panel at all.
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.triangle.branch")
+            HStack(spacing: 3) {
+                // Menu bar glyphs sit around 12pt; larger custom PNGs inflate the item.
+                BrandMark(kind: .kong, size: 12)
+                    .frame(width: 12, height: 12)
                 Text(state.menuBarLabel)
             }
+            .fixedSize()
         }
         .menuBarExtraStyle(.window)
     }

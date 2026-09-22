@@ -40,8 +40,11 @@ struct SetupView: View {
 
     private var tokenStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Connect to Konnect")
-                .font(.headline)
+            HStack(spacing: 8) {
+                BrandMark(kind: .kong, size: 24)
+                Text("Connect to Konnect")
+                    .font(.headline)
+            }
             Text("Paste a Konnect token. Your gateways and models are discovered from it.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)

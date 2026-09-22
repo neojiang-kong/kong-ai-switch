@@ -1,4 +1,3 @@
-import AppKit
 import KongAISwitchCore
 import SwiftUI
 
@@ -59,12 +58,30 @@ struct CredentialView: View {
 
             if !usingKeyAuth {
                 oidcHelp
+                Button {
+                    state.startOIDCBrowserLogin(for: profile)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "safari")
+                        Text(state.oidcSigningIn ? "Waiting for browser…" : "Sign in with browser")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(state.oidcSigningIn || state.busy != nil || auth?.oidc?.issuer == nil)
+                .help("Opens your IdP like Claude Desktop (PKCE → http://127.0.0.1:53180/callback)")
+
+                Text("Or paste a bearer token:")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             SecureField(usingKeyAuth ? "your API key" : "bearer token", text: $state.credentialValue)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 13))
                 .onSubmit { state.submitCredential(for: profile) }
+                .disabled(state.oidcSigningIn)
 
             if usingKeyAuth {
                 Toggle("Remember in Keychain", isOn: $state.credentialRemember)
@@ -101,7 +118,7 @@ struct CredentialView: View {
     }
 
     private var headerText: String {
-        if state.credentialSaveOnly {
+        if state.credentialSaveOnly, usingKeyAuth {
             return "Paste a new API key for \(profile.displayName). It is saved in your Keychain."
         }
         if usingKeyAuth {
@@ -112,17 +129,18 @@ struct CredentialView: View {
 
     @ViewBuilder
     private var actionButtons: some View {
-        if state.credentialSaveOnly {
+        if state.credentialSaveOnly, usingKeyAuth {
             Button("Save") { state.submitCredential(for: profile) }
                 .keyboardShortcut(.defaultAction)
-                .disabled(state.credentialValue.isEmpty || !usingKeyAuth)
-        } else if usingKeyAuth && canStoreKey {
+                .disabled(state.credentialValue.isEmpty)
+        } else if usingKeyAuth && canStoreKey && !state.credentialSaveOnly {
             Button("Save key") { state.saveCredentialOnly(for: profile) }
                 .disabled(state.credentialValue.isEmpty)
             Button("Switch") { state.submitCredential(for: profile) }
                 .keyboardShortcut(.defaultAction)
                 .disabled(state.credentialValue.isEmpty)
         } else {
+            // OIDC (including from the Key / Update-key entry): apply once, never store.
             Button("Switch") { state.submitCredential(for: profile) }
                 .keyboardShortcut(.defaultAction)
                 .disabled(state.credentialValue.isEmpty)
@@ -131,21 +149,19 @@ struct CredentialView: View {
 
     @ViewBuilder
     private var oidcHelp: some View {
+        let config = state.oidcLoginConfig(issuer: auth?.oidc?.issuer ?? "")
         VStack(alignment: .leading, spacing: 4) {
-            Text("Get a bearer token from your identity provider, then paste it here.")
-                .font(.system(size: 10))
+            Text(
+                "Sign in opens your identity provider in the browser (same PKCE loopback flow as Claude Desktop)."
+            )
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            Text("Client \(config.clientId) → \(config.redirectURI)")
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Typical flow: sign in to Keycloak (or your IdP), copy the access token, paste above.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let issuer = auth?.oidc?.issuer, let url = URL(string: issuer) {
-                Button("Open issuer in browser") {
-                    NSWorkspace.shared.open(url)
-                }
-                .controlSize(.small)
-            }
         }
     }
 

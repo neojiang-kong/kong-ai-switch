@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import KongAISwitchCore
 import SwiftUI
@@ -57,6 +58,10 @@ final class AppState: ObservableObject {
     @Published var credentialRemember = true
     @Published var credentialSaveOnly = false
     @Published var credentialError: String?
+    @Published var oidcSigningIn = false
+
+    /// In-flight browser OIDC login; cancelled when the credential sheet closes.
+    private var oidcLoginTask: Task<Void, Never>?
 
     var selectedAgent: Agent? {
         agents.first { $0.id == selectedAgentId }
@@ -314,6 +319,9 @@ final class AppState: ObservableObject {
     }
 
     func beginCredential(for model: ModelProfile, saveOnly: Bool = false) {
+        oidcLoginTask?.cancel()
+        oidcLoginTask = nil
+        oidcSigningIn = false
         credentialFor = model
         credentialValue = ""
         credentialError = nil
@@ -330,10 +338,93 @@ final class AppState: ObservableObject {
     }
 
     func cancelCredential() {
+        oidcLoginTask?.cancel()
+        oidcLoginTask = nil
+        oidcSigningIn = false
         credentialFor = nil
         credentialValue = ""
         credentialError = nil
         credentialSaveOnly = false
+    }
+
+    /// Public-client id for interactive OIDC (not the Kong gateway client).
+    ///
+    /// Claude Desktop registers `claude-desktop` with
+    /// `http://127.0.0.1:53180/callback` — reuse that when the selected agent
+    /// is Claude so the same Keycloak client works. Override with
+    /// UserDefaults `oidcClientId` / `oidcRedirectPort` when needed.
+    func oidcLoginConfig(issuer: String) -> OIDCLoginConfig {
+        let defaults = UserDefaults.standard
+        let clientId =
+            defaults.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
+            ?? {
+                switch selectedAgentId {
+                case "claude-code", "claude-desktop": return "claude-desktop"
+                case "codex": return "codex"
+                default: return "kong-ai-switch"
+                }
+            }()
+        let port: UInt16 = {
+            let stored = defaults.integer(forKey: "oidcRedirectPort")
+            if stored > 0, stored < 65536 { return UInt16(stored) }
+            return 53180
+        }()
+        return OIDCLoginConfig(issuer: issuer, clientId: clientId, redirectPort: port)
+    }
+
+    /// Browser PKCE sign-in, then switch the model with the access token.
+    func startOIDCBrowserLogin(for model: ModelProfile) {
+        guard let issuer = model.auth?.oidc?.issuer, !issuer.isEmpty else {
+            credentialError = "This model has no OIDC issuer configured."
+            return
+        }
+
+        oidcLoginTask?.cancel()
+        credentialUseKeyAuth = false
+        credentialError = nil
+        oidcSigningIn = true
+        busy = "Waiting for browser sign-in"
+
+        let config = oidcLoginConfig(issuer: issuer)
+        let login = OIDCInteractiveLogin()
+
+        oidcLoginTask = Task { [weak self] in
+            do {
+                let tokens = try await login.signIn(config: config) { url in
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.oidcSigningIn = false
+                    self.busy = nil
+                    self.credentialValue = tokens.accessToken
+                    self.credentialUseKeyAuth = false
+                    // Apply immediately — same as Switch with a pasted token.
+                    self.use(
+                        model: model,
+                        credential: tokens.accessToken,
+                        remember: false,
+                        authKind: "openid-connect"
+                    )
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self?.oidcSigningIn = false
+                    self?.busy = nil
+                }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    self.oidcSigningIn = false
+                    self.busy = nil
+                    if Task.isCancelled { return }
+                    self.credentialError = error.localizedDescription
+                }
+            }
+        }
     }
 
     func submitCredential(for model: ModelProfile) {
@@ -344,7 +435,12 @@ final class AppState: ObservableObject {
         }
 
         if credentialSaveOnly {
-            saveCredentialOnly(for: model, value: value)
+            // OIDC cannot be Keychain-saved; treat this as a one-shot switch.
+            if credentialUseKeyAuth {
+                saveCredentialOnly(for: model, value: value)
+            } else {
+                use(model: model, credential: value, remember: false, authKind: selectedAuthKind)
+            }
             return
         }
 

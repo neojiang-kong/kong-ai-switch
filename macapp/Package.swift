@@ -14,7 +14,8 @@ let package = Package(
         .executableTarget(
             name: "KongAISwitch",
             dependencies: ["KongAISwitchCore"],
-            path: "Sources/KongAISwitch"
+            path: "Sources/KongAISwitch",
+            resources: [.process("Resources")]
         ),
 
         // Self-checking executable: `swift run KongAISwitchChecks`.

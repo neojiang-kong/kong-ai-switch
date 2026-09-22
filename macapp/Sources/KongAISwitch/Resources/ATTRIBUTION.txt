@@ -1,0 +1,9 @@
+Brand marks bundled for identification in this Kong-oriented tool UI.
+
+Kong logomark: Official press-kit asset (electric lime #CCFF00 / #cf0).
+  Source: https://konghq.com/company/branding (Kong Press Kit).
+  Do not edit, recolor, or reconfigure per Kong brand guidelines.
+
+OpenAI, Anthropic, Claude, and GitHub marks: SVG paths from Simple Icons
+  (https://simpleicons.org), used only to identify those products in the UI.
+  Trademarks remain property of their respective owners.
