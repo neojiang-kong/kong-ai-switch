@@ -12,7 +12,7 @@
     "list": "node src/cli/index.js list",
     "use": "node src/cli/index.js use",
     "status": "node src/cli/index.js status",
-    "test": "node --test tests/"
+    "test": "node --test tests/*.test.js"
   },
   "engines": {
     "node": ">=20"

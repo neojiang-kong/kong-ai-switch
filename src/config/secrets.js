@@ -45,6 +45,101 @@ function accountFor(envName) {
 }
 
 /**
+ * Keychain account for a model's consumer credential.
+ *
+ * Scoped per environment and model, because the same model name can exist in
+ * two orgs with different keys, and one key rarely covers every model.
+ */
+function credentialAccountFor(envName, modelName) {
+  return `consumer-key:${envName}:${modelName}`;
+}
+
+/** Store a key-auth credential for one model. */
+export async function setModelCredential(envName, modelName, value, { keychain } = {}) {
+  const useKeychain = keychain ?? (await keychainAvailable());
+  if (!useKeychain) return BACKEND.FILE;
+
+  try {
+    await run(
+      "security",
+      [
+        "add-generic-password",
+        "-a", credentialAccountFor(envName, modelName),
+        "-s", SERVICE,
+        "-w", value,
+        "-U",
+        "-D", "kong-ai-switch gateway credential",
+      ],
+      { timeout: TIMEOUT_MS },
+    );
+    return BACKEND.KEYCHAIN;
+  } catch {
+    return BACKEND.FILE;
+  }
+}
+
+/** Read a model's stored credential, or null when absent. */
+export async function getModelCredential(envName, modelName, { keychain } = {}) {
+  const useKeychain = keychain ?? (await keychainAvailable());
+  if (!useKeychain) return null;
+
+  try {
+    const { stdout } = await run(
+      "security",
+      ["find-generic-password", "-a", credentialAccountFor(envName, modelName), "-s", SERVICE, "-w"],
+      { timeout: TIMEOUT_MS },
+    );
+    const value = stdout.replace(/\n$/, "");
+    return value === "" ? null : value;
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteModelCredential(envName, modelName, { keychain } = {}) {
+  const useKeychain = keychain ?? (await keychainAvailable());
+  if (!useKeychain) return false;
+
+  try {
+    await run(
+      "security",
+      ["delete-generic-password", "-a", credentialAccountFor(envName, modelName), "-s", SERVICE],
+      { timeout: TIMEOUT_MS },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the credential to send to the gateway for one model.
+ *
+ * Precedence: an explicit value, then KONG_AI_TOKEN for one-off and CI use,
+ * then the stored key. An OIDC bearer token is never read from storage,
+ * because it expires and a stale one produces a confusing 401.
+ */
+export async function resolveModelCredential(
+  envName,
+  modelName,
+  { explicit, kind, keychain } = {},
+) {
+  if (explicit) return { credential: explicit, source: "explicit" };
+
+  const fromEnv = process.env.KONG_AI_TOKEN;
+  if (fromEnv) return { credential: fromEnv, source: "KONG_AI_TOKEN" };
+
+  if (kind === "openid-connect") {
+    return { credential: null, source: BACKEND.NONE, expiring: true };
+  }
+
+  const stored = await getModelCredential(envName, modelName, { keychain });
+  if (stored) return { credential: stored, source: BACKEND.KEYCHAIN };
+
+  return { credential: null, source: BACKEND.NONE };
+}
+
+/**
  * Store a token. Returns the backend that accepted it, so the caller can
  * report where it went; a file fallback is a meaningfully weaker promise
  * than the keychain and should not be described as the same thing.

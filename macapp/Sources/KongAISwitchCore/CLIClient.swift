@@ -198,13 +198,45 @@ public struct KongCLI: Sendable {
     }
 
     /// Point one or more agents at a model.
-    public func use(model: String, environment: String?, agents: [String] = []) throws
-        -> SwitchResult
-    {
+    public func use(
+        model: String,
+        environment: String?,
+        agents: [String] = [],
+        credential: String? = nil,
+        save: Bool = true,
+        authKind: String? = nil
+    ) throws -> SwitchResult {
         var args = ["use", model]
         if let environment { args += ["--env", environment] }
         if !agents.isEmpty { args += ["--agent", agents.joined(separator: ",")] }
+        if let credential, !credential.isEmpty { args += ["--token", credential] }
+        if !save { args += ["--save", "false"] }
+        if let authKind, !authKind.isEmpty { args += ["--auth", authKind] }
         return try run(args, as: SwitchResult.self)
+    }
+
+    /// Save a long-lived API key without switching agents.
+    public func setCredential(model: String, environment: String?, token: String) throws {
+        var args = [location.script.path, "credential", "set", model, "--token", token]
+        if let environment { args += ["--env", environment] }
+        let result = try runner.run(
+            executable: location.node, arguments: args, environment: childEnvironment)
+        if result.status != 0 {
+            let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+            throw CLIError(stderr.isEmpty ? "Could not save credential." : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// Remove a stored API key for one model.
+    public func clearCredential(model: String, environment: String?) throws {
+        var args = [location.script.path, "credential", "clear", model]
+        if let environment { args += ["--env", environment] }
+        let result = try runner.run(
+            executable: location.node, arguments: args, environment: childEnvironment)
+        if result.status != 0 {
+            let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+            throw CLIError(stderr.isEmpty ? "Could not clear credential." : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
     }
 
     public func status() throws -> StatusResult {

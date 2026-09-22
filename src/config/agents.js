@@ -14,6 +14,7 @@
 import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { authWithKind } from "../kong/auth.js";
 
 /** Agents this tool can configure. */
 export const AGENTS = {
@@ -154,10 +155,28 @@ function applyJsonEnv(settings, profile, { token }) {
   // A Kong model name is not a Claude model id; without this the CLI refuses.
   env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT = "1";
 
-  if (token) env.ANTHROPIC_AUTH_TOKEN = token;
-  else if (!profile.requiresAuth) {
-    // Without a token the client may fall back to its own credentials and
-    // quietly bypass the gateway, defeating the point of routing through it.
+  // Where the credential goes depends on the strategy, and getting this wrong
+  // fails with a 401 that looks like a gateway problem.
+  //
+  //   key-auth        wants its own header, `apikey` by default. Claude Code
+  //                   sends ANTHROPIC_AUTH_TOKEN as a bearer Authorization
+  //                   header, which key-auth ignores, so the key must travel
+  //                   via ANTHROPIC_CUSTOM_HEADERS instead.
+  //   openid-connect  wants a bearer token, which ANTHROPIC_AUTH_TOKEN is.
+  const header = profile.auth?.preferred?.header;
+  const usesCustomHeader =
+    profile.auth?.preferred?.kind === "key-auth" &&
+    header &&
+    header.toLowerCase() !== "authorization";
+
+  if (token && usesCustomHeader) {
+    env.ANTHROPIC_CUSTOM_HEADERS = `${header}: ${token}`;
+    // Claude Code still needs a non-empty token or it falls back to its own
+    // credentials and bypasses the gateway entirely.
+    env.ANTHROPIC_AUTH_TOKEN = env.ANTHROPIC_AUTH_TOKEN || "kong-ai-gateway";
+  } else if (token) {
+    env.ANTHROPIC_AUTH_TOKEN = token;
+  } else if (!profile.requiresAuth) {
     env.ANTHROPIC_AUTH_TOKEN = env.ANTHROPIC_AUTH_TOKEN || "kong-ai-gateway";
   }
 
@@ -216,12 +235,13 @@ function applyCodexToml(existing, profile, { token }) {
  * Point one agent at a model.
  * @returns {{agent: string, file: string, created: boolean}}
  */
-export async function applyToAgent(agentId, profile, { token, home = homedir() } = {}) {
+export async function applyToAgent(agentId, profile, { token, home = homedir(), authKind } = {}) {
   const agent = getAgent(agentId);
+  const effective = authKind ? { ...profile, auth: authWithKind(profile.auth, authKind) } : profile;
 
-  if (!agent.formats.includes(profile.format)) {
+  if (!agent.formats.includes(effective.format)) {
     throw new Error(
-      `${agent.name} cannot call "${profile.name}": it serves the "${profile.format}" format, ` +
+      `${agent.name} cannot call "${effective.name}": it serves the "${effective.format}" format, ` +
         `and ${agent.name} speaks ${agent.formats.join("/")}.`,
     );
   }
@@ -230,7 +250,7 @@ export async function applyToAgent(agentId, profile, { token, home = homedir() }
 
   if (agent.kind === "json-env") {
     const { settings, existed } = await readJsonSettings(file);
-    const next = applyJsonEnv(settings, profile, { token });
+    const next = applyJsonEnv(settings, effective, { token });
     await writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
     return { agent: agent.id, file, created: !existed };
   }
@@ -244,7 +264,7 @@ export async function applyToAgent(agentId, profile, { token, home = homedir() }
       if (cause?.code !== "ENOENT") throw new Error(`Could not read ${file}: ${cause.message}`);
       existed = false;
     }
-    await writeAtomic(file, applyCodexToml(existing, profile, { token }));
+    await writeAtomic(file, applyCodexToml(existing, effective, { token }));
     return { agent: agent.id, file, created: !existed };
   }
 

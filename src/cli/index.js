@@ -12,6 +12,7 @@ import process from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
 import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS } from "../kong/client.js";
 import { buildProfiles, gatewayOrigin } from "../kong/models.js";
+import { authWithKind, AUTH_KIND } from "../kong/auth.js";
 import {
   readState,
   writeState,
@@ -33,7 +34,16 @@ import {
   ConfigError,
   configPath,
 } from "../config/environments.js";
-import { resolveToken, setToken, deleteToken, BACKEND } from "../config/secrets.js";
+import {
+  resolveToken,
+  setToken,
+  deleteToken,
+  setModelCredential,
+  getModelCredential,
+  deleteModelCredential,
+  resolveModelCredential,
+  BACKEND,
+} from "../config/secrets.js";
 import { switchTo, currentTarget, claudeSettingsPath } from "../config/claude.js";
 import {
   listAgents,
@@ -59,7 +69,10 @@ Models:
   kong-ai-switch discover --token <pat> [--region <r>]  find gateways from a token
   kong-ai-switch sync [--env <name>] [--gateway <id>]
   kong-ai-switch list [--env <name>] [--all] [--json]
-  kong-ai-switch use <model> [--env <name>] [--agent <a,b>] [--token <t>]
+  kong-ai-switch use <model> [--env <name>] [--agent <a,b>] [--token <t>] [--auth <kind>]
+  kong-ai-switch credential set <model> --token <key> [--env <name>]
+  kong-ai-switch credential clear <model> [--env <name>]
+  kong-ai-switch credential show <model> [--env <name>]
   kong-ai-switch agents                                 which agents, and where they point
   kong-ai-switch status
 
@@ -69,7 +82,11 @@ the active one.
 Environment variables (override the active environment):
   KONNECT_TOKEN       Konnect personal access token
   KONNECT_PROXY_URL   data plane address, e.g. http://localhost:8000
-  KONG_AI_TOKEN       credential for models behind an AI Auth Strategy
+  KONG_AI_TOKEN       one-off credential for models behind an AI Auth Strategy
+
+Auth kinds for --auth: key-auth, openid-connect
+  key-auth            long-lived API key (stored in Keychain when saved)
+  openid-connect      bearer token from your IdP (never stored; expires)
 
 Regions: ${Object.keys(KONNECT_REGIONS).join(", ")}, or a full control plane URL
 `;
@@ -281,6 +298,127 @@ function describeTokenSource(source) {
       return "config file";
     default:
       return "missing";
+  }
+}
+
+/** Normalise --auth to the kind strings this tool uses internally. */
+function normalizeAuthKind(value) {
+  if (typeof value !== "string") return null;
+  const kind = value.trim().toLowerCase();
+  if (kind === AUTH_KIND.KEY_AUTH || kind === "key-auth") return AUTH_KIND.KEY_AUTH;
+  if (kind === AUTH_KIND.OIDC || kind === "oidc" || kind === "openid-connect") return AUTH_KIND.OIDC;
+  throw new UserError(`Unknown auth kind "${value}". Use key-auth or openid-connect.`);
+}
+
+async function resolveModelProfile(envName, modelName) {
+  const state = await readState();
+  const entry = environmentState(state, envName);
+  const { profile, error } = resolveProfile(entry.profiles, modelName);
+  if (error) throw new UserError(error);
+  return profile;
+}
+
+async function cmdCredentialSet(positional, flags) {
+  const modelName = positional[0];
+  const token = typeof flags.token === "string" ? flags.token : null;
+  if (!modelName) throw new UserError("Usage: kong-ai-switch credential set <model> --token <key>");
+  if (!token) throw new UserError("Pass the API key with --token.");
+
+  const { env } = await activeEnvironment(flags);
+  const profile = await resolveModelProfile(env.name, modelName);
+  const auth = profile.auth ?? { required: profile.requiresAuth };
+
+  if (!auth.required) {
+    throw new UserError(`"${profile.name}" does not require a credential.`);
+  }
+  if (!auth.strategies?.some((s) => s.storable)) {
+    throw new UserError(
+      `"${profile.name}" uses OIDC bearer tokens, which expire and are not stored.\n` +
+        `Supply a fresh token when switching:\n` +
+        `  kong-ai-switch use ${profile.name} --token <bearer-token> --auth openid-connect`,
+    );
+  }
+
+  const backend = await setModelCredential(env.name, profile.name, token);
+  if (flags.json) {
+    emitJson({ ok: true, environment: env.name, model: profile.name, backend });
+    return;
+  }
+
+  process.stdout.write(
+    backend === BACKEND.KEYCHAIN
+      ? `Saved the key for "${profile.name}" to your Keychain.\n`
+      : `Could not reach the Keychain; the key was not saved.\n`,
+  );
+}
+
+async function cmdCredentialClear(positional, flags) {
+  const modelName = positional[0];
+  if (!modelName) throw new UserError("Usage: kong-ai-switch credential clear <model>");
+
+  const { env } = await activeEnvironment(flags);
+  const profile = await resolveModelProfile(env.name, modelName);
+  await deleteModelCredential(env.name, profile.name);
+
+  if (flags.json) {
+    emitJson({ ok: true, environment: env.name, model: profile.name });
+    return;
+  }
+  process.stdout.write(`Removed the stored key for "${profile.name}".\n`);
+}
+
+async function cmdCredentialShow(positional, flags) {
+  const modelName = positional[0];
+  if (!modelName) throw new UserError("Usage: kong-ai-switch credential show <model>");
+
+  const { env } = await activeEnvironment(flags);
+  const profile = await resolveModelProfile(env.name, modelName);
+  const auth = profile.auth ?? { required: profile.requiresAuth };
+  const stored = await getModelCredential(env.name, profile.name);
+  const fromEnv = Boolean(process.env.KONG_AI_TOKEN);
+
+  if (flags.json) {
+    emitJson({
+      ok: true,
+      environment: env.name,
+      model: profile.name,
+      required: auth.required,
+      kind: auth.preferred?.kind ?? null,
+      hasStoredKey: Boolean(stored),
+      hasEnvOverride: fromEnv,
+      strategies: auth.strategies ?? [],
+    });
+    return;
+  }
+
+  if (!auth.required) {
+    process.stdout.write(`"${profile.name}" does not require a credential.\n`);
+    return;
+  }
+
+  process.stdout.write(`${profile.name}\n`);
+  if (stored) process.stdout.write("  stored key   yes (Keychain)\n");
+  else process.stdout.write("  stored key   no\n");
+  if (fromEnv) process.stdout.write("  KONG_AI_TOKEN is set (overrides stored key)\n");
+  for (const s of auth.strategies ?? []) {
+    process.stdout.write(`  ${s.displayName ?? s.name} (${s.type ?? s.kind}) — ${s.hint ?? ""}\n`.trimEnd() + "\n");
+  }
+}
+
+async function cmdCredential(positional, flags) {
+  const [sub, ...rest] = positional;
+  switch (sub) {
+    case "set":
+      return cmdCredentialSet(rest, flags);
+    case "clear":
+    case "rm":
+      return cmdCredentialClear(rest, flags);
+    case "show":
+      return cmdCredentialShow(rest, flags);
+    default:
+      throw new UserError(
+        `Unknown "credential" subcommand "${sub ?? ""}". Try: set, clear, show.`,
+      );
   }
 }
 
@@ -531,7 +669,18 @@ async function cmdSync(flags) {
       summaries.push(`  ${gateway.display_name ?? gateway.name}: could not read models (${cause.message})`);
       continue;
     }
-    const built = buildProfiles(models, gateway, { origin });
+    // Auth strategies are referenced by name from each model, so fetch them
+    // once per gateway to describe how a client should authenticate.
+    let strategiesByName = new Map();
+    try {
+      const strategies = await client.listAuthStrategies(gateway.id);
+      strategiesByName = new Map(strategies.map((s) => [s.name, s]));
+    } catch {
+      // A gateway whose strategies we cannot read still yields usable models;
+      // they are just reported as needing auth, without the detail.
+    }
+
+    const built = buildProfiles(models, gateway, { origin, strategiesByName });
     profiles.push(...built.profiles);
     skipped.push(...built.skipped);
     summaries.push(
@@ -587,16 +736,40 @@ async function cmdList(flags) {
   const state = await readState();
   const entry = environmentState(state, env.name);
 
+  const active = await currentTarget();
+  const targetAgent = typeof flags.agent === "string" ? flags.agent.split(",")[0].trim() : "claude-code";
+  let agentFormats = ["anthropic"];
+  try {
+    agentFormats = getAgent(targetAgent).formats;
+  } catch (cause) {
+    if (flags.json) throw new UserError(cause.message);
+  }
+
+  const usable = entry.profiles.filter((p) => agentFormats.includes(p.format));
+  const incompatible = entry.profiles.filter((p) => !agentFormats.includes(p.format));
+  const shown = flags.all ? entry.profiles : usable;
+
   if (flags.json) {
-    const active = await currentTarget();
+    const rows = await Promise.all(
+      shown.map(async (p) => {
+        const storable = p.auth?.strategies?.some((s) => s.storable) ?? false;
+        const hasCredential =
+          storable && Boolean(await getModelCredential(env.name, p.name));
+        return {
+          ...p,
+          active: Boolean(active && active.baseUrl === p.baseUrl && active.model === p.clientModelId),
+          hasCredential: storable ? hasCredential : null,
+        };
+      }),
+    );
     emitJson({
       ok: true,
       environment: env.name,
       syncedAt: entry.syncedAt,
-      profiles: entry.profiles.map((p) => ({
-        ...p,
-        active: Boolean(active && active.baseUrl === p.baseUrl && active.model === p.clientModelId),
-      })),
+      agent: targetAgent,
+      totalCount: entry.profiles.length,
+      hiddenCount: flags.all ? 0 : incompatible.length,
+      profiles: rows,
     });
     return;
   }
@@ -606,24 +779,15 @@ async function cmdList(flags) {
     return;
   }
 
-  const active = await currentTarget();
-
   // Usability is per agent: an openai-format model is unusable from Claude
   // Code but is exactly what Codex needs, so filter by the agent in question.
-  const targetAgent = typeof flags.agent === "string" ? flags.agent.split(",")[0].trim() : "claude-code";
-  let agentFormats;
   let agentName;
   try {
     const agent = getAgent(targetAgent);
-    agentFormats = agent.formats;
     agentName = agent.name;
   } catch (cause) {
     throw new UserError(cause.message);
   }
-
-  const usable = entry.profiles.filter((p) => agentFormats.includes(p.format));
-  const incompatible = entry.profiles.filter((p) => !agentFormats.includes(p.format));
-  const shown = flags.all ? entry.profiles : usable;
 
   if (shown.length === 0) {
     process.stdout.write("No models Claude Code can use.\n");
@@ -721,13 +885,38 @@ async function cmdUse(positional, flags) {
     }
   }
 
-  const token = flags.token ?? process.env.KONG_AI_TOKEN;
-  if (profile.requiresAuth && !token) {
-    throw new UserError(
-      `"${profile.name}" is behind an AI Auth Strategy, so it needs a credential.\n` +
-        "Pass --token <value> or set KONG_AI_TOKEN.",
-    );
+  // Resolve the gateway credential according to the model's strategy.
+  const auth = profile.auth ?? { required: profile.requiresAuth };
+  const explicit = typeof flags.token === "string" ? flags.token : undefined;
+  const authKind = normalizeAuthKind(flags.auth) ?? auth.preferred?.kind;
+  const effectiveAuth = authWithKind(auth, authKind) ?? auth;
+
+  const { credential } = await resolveModelCredential(env.name, profile.name, {
+    explicit,
+    kind: authKind,
+  });
+
+  if (effectiveAuth.required && !credential) {
+    throw new UserError(describeMissingCredential(profile, effectiveAuth, env.name));
   }
+
+  // Offer to remember a long-lived key so the next switch needs no flag.
+  const shouldSave = flags.save !== false && flags.save !== "false";
+  if (explicit && effectiveAuth.preferred?.storable && shouldSave) {
+    const backend = await setModelCredential(env.name, profile.name, explicit);
+    if (!flags.json) {
+      process.stdout.write(
+        backend === BACKEND.KEYCHAIN
+          ? `Saved the key for "${profile.name}" to your Keychain.\n`
+          : `Could not reach the Keychain; the key was used but not saved.\n`,
+      );
+    }
+  }
+
+  const token = credential;
+  const profileForAgent = authKind
+    ? { ...profile, auth: effectiveAuth }
+    : profile;
 
   const applied = [];
   for (const agentId of requestedAgents) {
@@ -735,7 +924,7 @@ async function cmdUse(positional, flags) {
     // Claude Desktop shares Claude Code's file; writing twice is wasted work.
     if (agent.sharesConfigWith && requestedAgents.includes(agent.sharesConfigWith)) continue;
     try {
-      applied.push(await applyToAgent(agentId, profile, { token }));
+      applied.push(await applyToAgent(agentId, profileForAgent, { token, authKind }));
     } catch (cause) {
       throw new UserError(cause.message);
     }
@@ -775,6 +964,50 @@ async function cmdUse(positional, flags) {
     process.stdout.write(`Wrote ${a.file}${a.created ? " (created)" : ""}.\n`);
   }
   process.stdout.write(`Restart ${names} for the change to take effect.\n`);
+}
+
+/**
+ * Explain what credential a model needs, in terms of its actual strategy.
+ *
+ * "Auth required" is not actionable. A key-auth model needs a key the tool
+ * can store; an OIDC model needs a bearer token that expires, which is a
+ * different thing to ask for and worth saying so.
+ */
+function describeMissingCredential(profile, auth, envName) {
+  const lines = [`"${profile.name}" requires a credential.`];
+
+  const strategies = auth.strategies ?? [];
+  if (strategies.length > 1) {
+    lines.push("", `It accepts ${strategies.length} strategies:`);
+    for (const s of strategies) {
+      lines.push(`  ${s.displayName ?? s.name} (${s.type ?? "unknown"}) — ${s.hint ?? ""}`.trimEnd());
+    }
+  } else if (strategies.length === 1) {
+    const s = strategies[0];
+    lines.push("", `Strategy: ${s.displayName ?? s.name} (${s.type ?? "unknown"})`);
+    if (s.hint) lines.push(s.hint);
+  }
+
+  const keyAuth = strategies.find((s) => s.kind === "key-auth");
+  const oidc = strategies.find((s) => s.kind === "openid-connect");
+
+  lines.push("");
+  if (keyAuth) {
+    lines.push("With an API key (saved to your Keychain for next time):");
+    lines.push(`  kong-ai-switch use ${profile.name} --token <your-key>`);
+  }
+  if (oidc) {
+    if (keyAuth) lines.push("");
+    lines.push("With an OIDC bearer token (expires, so it is not stored):");
+    if (oidc.issuer) lines.push(`  issuer: ${oidc.issuer}`);
+    lines.push(`  KONG_AI_TOKEN=<bearer-token> kong-ai-switch use ${profile.name}`);
+  }
+  if (!keyAuth && !oidc) {
+    lines.push(`  kong-ai-switch use ${profile.name} --token <credential>`);
+  }
+
+  void envName;
+  return lines.join("\n");
 }
 
 /** List the coding agents this tool can configure, and where each points. */
@@ -911,6 +1144,9 @@ async function main() {
         return 0;
       case "use":
         await cmdUse(positional, flags);
+        return 0;
+      case "credential":
+        await cmdCredential(positional, flags);
         return 0;
       case "agents":
         await cmdAgents(flags);

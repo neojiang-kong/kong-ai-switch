@@ -1,3 +1,5 @@
+import { describeModelAuth } from "./auth.js";
+
 /**
  * Translate Kong AI Gateway entities into switchable profiles.
  *
@@ -152,6 +154,7 @@ export function claudeCodeCompatibility(model) {
  * @param {string} [options.origin] Data plane origin when Konnect has none.
  */
 export function toProfile(model, gateway, options = {}) {
+  const strategiesByName = options.strategiesByName ?? new Map();
   const name = model?.name;
   if (!name) return { profile: null, skipped: { name: "(unnamed)", reason: "model has no name" } };
 
@@ -204,6 +207,8 @@ export function toProfile(model, gateway, options = {}) {
       policies: Array.isArray(model?.policies) ? model.policies : [],
       labels: model?.labels ?? {},
       requiresAuth: modelRequiresAuth(model),
+      /** How a client authenticates: key-auth, OIDC, or nothing. */
+      auth: describeModelAuth(model, strategiesByName),
       claudeCode,
     },
     skipped: null,

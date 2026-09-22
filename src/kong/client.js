@@ -163,6 +163,16 @@ export class KongAiGatewayClient {
     return this.paginate(`/ai-gateways/${encodeURIComponent(gatewayId)}/models`, { cursor: true });
   }
 
+  /**
+   * List AI Auth Strategies, so a client knows how to authenticate.
+   * A model references these by name in access.auth_strategies.
+   */
+  async listAuthStrategies(gatewayId) {
+    return this.paginate(`/ai-gateways/${encodeURIComponent(gatewayId)}/auth-strategies`, {
+      cursor: true,
+    });
+  }
+
   /** List AI Model Providers, used to show which vendor backs each model. */
   async listModelProviders(gatewayId) {
     return this.paginate(`/ai-gateways/${encodeURIComponent(gatewayId)}/model-providers`, {

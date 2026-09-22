@@ -15,6 +15,8 @@ struct MenuView: View {
                 missingCLI
             } else if state.showingSetup {
                 SetupView(state: state, editing: state.editingEnvironment)
+            } else if let profile = state.credentialFor {
+                CredentialView(state: state, profile: profile)
             } else if state.environments.isEmpty {
                 welcome
             } else {
@@ -147,6 +149,16 @@ struct MenuView: View {
         }
     }
 
+    /// What an agent row says beneath its name: where it points, and how many
+    /// models in this environment it can actually reach. Showing the count
+    /// here means a mismatch is visible before the list turns up empty.
+    private func agentSubtitle(_ agent: Agent) -> String {
+        let reachable = state.models.filter { agent.formats.contains($0.format) }.count
+        let where_ = agent.configured ? (agent.model ?? "configured") : "not set"
+        guard !state.models.isEmpty else { return where_ }
+        return "\(where_) · \(reachable) model\(reachable == 1 ? "" : "s")"
+    }
+
     /// Which coding agent to configure.
     ///
     /// One gateway serves many clients, so this scopes both the model list
@@ -177,7 +189,7 @@ struct MenuView: View {
                                     .system(
                                         size: 12,
                                         weight: agent.id == state.selectedAgentId ? .medium : .regular))
-                            Text(agent.statusLabel)
+                            Text(agentSubtitle(agent))
                                 .font(.system(size: 10))
                                 .foregroundStyle(agent.configured ? .secondary : .tertiary)
                         }
@@ -216,23 +228,14 @@ struct MenuView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
             } else if state.usableModels.isEmpty {
-                Text(state.environments.isEmpty
-                     ? "No environments yet. Create one with the CLI:\nkong-ai-switch env add mine --region us"
-                     : "No models synced. Choose Sync below.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                emptyModelList
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(state.usableModels) { model in
-                            modelRow(model)
-                        }
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(state.usableModels) { model in
+                        modelRow(model)
                     }
                 }
-                .frame(maxHeight: 220)
+                .frame(minHeight: min(CGFloat(state.usableModels.count) * 30, 220))
             }
 
             if state.hiddenModelCount > 0 {
@@ -247,34 +250,148 @@ struct MenuView: View {
         .padding(.bottom, 6)
     }
 
-    private func modelRow(_ model: ModelProfile) -> some View {
-        Button {
-            state.use(model: model)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: (model.active ?? false) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle((model.active ?? false) ? Color.accentColor : .secondary)
-                    .font(.caption)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(model.displayName)
-                        .font(.system(size: 12, weight: (model.active ?? false) ? .medium : .regular))
-                    Text(model.upstreamSummary)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                if model.requiresAuth {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                        .help("Requires a consumer credential")
+    /// Nothing to show for this agent. Say why, and offer the way out.
+    ///
+    /// The common case is not "no models" but "models the selected agent
+    /// cannot speak to", and the usual remedy is to select a different agent
+    /// rather than to change anything in Kong.
+    @ViewBuilder
+    private var emptyModelList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if state.models.isEmpty {
+                Text("No models synced yet. Choose Sync below.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(
+                    "None of the \(state.models.count) models here speak \(state.selectedAgentName)'s protocol."
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                // Point at an agent that can actually use them.
+                if !agentsWithModels.isEmpty {
+                    ForEach(agentsWithModels, id: \.agent.id) { entry in
+                        Button {
+                            state.selectAgent(entry.agent.id)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.right.circle")
+                                    .font(.system(size: 10))
+                                Text(
+                                    "\(entry.count) model\(entry.count == 1 ? "" : "s") for \(entry.agent.name)"
+                                )
+                                .font(.system(size: 11))
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                    }
+                } else {
+                    Text(
+                        "To use these from \(state.selectedAgentName), set the AI Model's formats[].type in Kong. Kong still translates to whatever upstream provider it targets."
+                    )
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    /// Other agents that could use the models in this environment.
+    private var agentsWithModels: [(agent: Agent, count: Int)] {
+        state.agents.compactMap { agent in
+            guard agent.id != state.selectedAgentId else { return nil }
+            // Claude Desktop shares Claude Code's file, so offering both is noise.
+            if let shared = agent.sharesConfigWith, shared == state.selectedAgentId { return nil }
+            let count = state.models.filter { agent.formats.contains($0.format) }.count
+            return count > 0 ? (agent, count) : nil
+        }
+    }
+
+    private func modelRow(_ model: ModelProfile) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                state.use(model: model)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: (model.active ?? false) ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle((model.active ?? false) ? Color.accentColor : .secondary)
+                        .font(.caption)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(model.displayName)
+                            .font(.system(size: 12, weight: (model.active ?? false) ? .medium : .regular))
+                        Text(modelSubtitle(model))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            authAction(for: model)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .contextMenu {
+            if model.requiresAuth || model.auth?.required == true {
+                Button("Enter credential…") { state.beginCredential(for: model) }
+                if model.hasCredential == true {
+                    Button("Clear saved key", role: .destructive) { state.clearCredential(for: model) }
+                }
+            }
+        }
+    }
+
+    private func modelSubtitle(_ model: ModelProfile) -> String {
+        var parts = [model.upstreamSummary]
+        if model.hasCredential == true {
+            parts.append("key saved")
+        } else if state.needsCredentialPrompt(model) {
+            parts.append("tap key to enter")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Visible key control. The user should never need the terminal to paste a credential.
+    @ViewBuilder
+    private func authAction(for model: ModelProfile) -> some View {
+        if model.hasCredential == true {
+            Button {
+                state.beginCredential(for: model, saveOnly: true)
+            } label: {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.green)
+            }
+            .buttonStyle(.plain)
+            .help("Key saved. Click to replace it.")
+        } else if state.needsCredentialPrompt(model) {
+            Button {
+                state.beginCredential(for: model)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "key")
+                        .font(.system(size: 10))
+                    Text("Key")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 4))
+            }
+            .buttonStyle(.plain)
+            .help("Enter your API key or OIDC token in the app")
+        }
     }
 
     private var footer: some View {

@@ -47,6 +47,15 @@ final class AppState: ObservableObject {
     @Published var agents: [Agent] = []
     @Published var selectedAgentId: String = "claude-code"
 
+    /// Credential prompt, shown when a model's auth strategy needs one.
+    @Published var credentialFor: ModelProfile?
+    @Published var credentialValue = ""
+    @Published var credentialUseKeyAuth = true
+    @Published var credentialRemember = true
+    @Published var credentialSaveOnly = false
+    @Published var credentialError: String?
+    @Published var hiddenModelCount = 0
+
     var selectedAgent: Agent? {
         agents.first { $0.id == selectedAgentId }
     }
@@ -88,19 +97,29 @@ final class AppState: ObservableObject {
         return model.count > 18 ? String(model.prefix(17)) + "…" : model
     }
 
-    /// Models the selected agent can actually call.
-    ///
-    /// The CLI already filters by agent, but an older cached response may
-    /// carry models in other formats, so filter here too.
+    /// Models the selected agent can call. The CLI already filters by agent;
+    /// keep a local filter so a stale response cannot show unreachable ones.
     var usableModels: [ModelProfile] {
         guard let formats = selectedAgent?.formats, !formats.isEmpty else {
-            return models.filter(\.isUsable)
+            return models
         }
-        return models.filter { formats.contains($0.format) }
+        let matched = models.filter { formats.contains($0.format) }
+        // If the CLI already filtered and every row matches, use that list as-is.
+        return matched.isEmpty ? models : matched
     }
 
-    var hiddenModelCount: Int {
-        models.count - usableModels.count
+    /// Total synced models in the active environment (from the last list call).
+    var totalModelCount: Int {
+        activeEnvironment?.modelCount ?? models.count
+    }
+
+    var activeEnvironment: KongEnvironment? {
+        environments.first(where: \.active)
+    }
+
+    /// Which auth kind the credential form is collecting.
+    var selectedAuthKind: String {
+        credentialUseKeyAuth ? "key-auth" : "openid-connect"
     }
 
     /// Run work off the main actor, surfacing any failure in the UI.
@@ -150,16 +169,15 @@ final class AppState: ObservableObject {
                 // With no environments, or one never synced, the CLI has
                 // nothing to list. That is a first-run state, not an error,
                 // so it must not put a red message on the welcome screen.
-                let models =
-                    envs.isEmpty
-                    ? []
-                    : ((try? cli.listModels(environment: active, agent: agentId))?.profiles ?? [])
+                let list = envs.isEmpty ? nil : try? cli.listModels(environment: active, agent: agentId)
+                let models = list?.profiles ?? []
                 let status = try? cli.status()
                 let agents = (try? cli.listAgents()) ?? []
 
                 await MainActor.run {
                     self.environments = envs
                     self.models = models
+                    self.hiddenModelCount = list?.hiddenCount ?? max(0, (list?.totalCount ?? models.count) - models.count)
                     self.status = status
                     self.agents = agents
                     self.errorMessage = nil
@@ -184,14 +202,160 @@ final class AppState: ObservableObject {
         }
     }
 
-    func use(model: ModelProfile) {
+    /// Whether this model still needs the user to type a credential in the UI.
+    ///
+    /// The whole point of the menu bar app is that the user never opens a
+    /// terminal to paste a key. Open the form immediately when nothing is
+    /// stored; only call the CLI once we have a value to hand it.
+    func needsCredentialPrompt(_ model: ModelProfile) -> Bool {
+        guard model.requiresAuth || model.auth?.required == true else { return false }
+        // A saved key-auth credential is enough to switch without asking.
+        if model.hasCredential == true { return false }
+        return true
+    }
+
+    /// Switch to a model. Opens the in-app credential form when auth is needed
+    /// and nothing is stored yet — never sends the user to the CLI.
+    func use(model: ModelProfile, credential: String? = nil, remember: Bool = false, authKind: String? = nil) {
+        // Ask in the UI first. Round-tripping to the CLI just to learn a key
+        // is missing would put a red error on screen before the prompt.
+        if credential == nil, needsCredentialPrompt(model) {
+            beginCredential(for: model)
+            return
+        }
+
         let name = activeEnvironmentName
         let agentId = selectedAgentId
         let agentName = selectedAgentName
-        perform("Switching") { cli in
-            try cli.use(model: model.name, environment: name, agents: [agentId])
-        } then: { result in
-            self.toast = "Now using \(result.displayName). Restart \(agentName)."
+        let kind = authKind ?? (credential == nil ? nil : selectedAuthKind)
+
+        guard let cli else {
+            cliMissing = true
+            return
+        }
+        busy = "Switching"
+        errorMessage = nil
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try cli.use(
+                    model: model.name, environment: name, agents: [agentId],
+                    credential: credential, save: remember, authKind: kind
+                )
+                await MainActor.run {
+                    self.busy = nil
+                    self.credentialFor = nil
+                    self.credentialValue = ""
+                    self.credentialError = nil
+                    self.credentialSaveOnly = false
+                    self.toast = "Now using \(result.displayName). Restart \(agentName)."
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.busy = nil
+                    let message = error.localizedDescription
+
+                    // Still open the form if the CLI disagrees with our cache.
+                    if message.contains("requires a credential"), model.auth?.required == true {
+                        self.beginCredential(for: model)
+                    } else if self.credentialFor != nil {
+                        self.credentialError = message
+                    } else {
+                        self.errorMessage = message
+                    }
+                }
+            }
+        }
+    }
+
+    func beginCredential(for model: ModelProfile, saveOnly: Bool = false) {
+        credentialFor = model
+        credentialValue = ""
+        credentialError = nil
+        credentialSaveOnly = saveOnly
+        // Default to the strategy this tool can actually hold for the user.
+        if let auth = model.auth {
+            if auth.keyAuth != nil {
+                credentialUseKeyAuth = true
+            } else if auth.oidc != nil {
+                credentialUseKeyAuth = false
+            }
+        }
+        credentialRemember = true
+    }
+
+    func cancelCredential() {
+        credentialFor = nil
+        credentialValue = ""
+        credentialError = nil
+        credentialSaveOnly = false
+    }
+
+    func submitCredential(for model: ModelProfile) {
+        let value = credentialValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            credentialError = "Enter the credential first."
+            return
+        }
+
+        if credentialSaveOnly {
+            saveCredentialOnly(for: model, value: value)
+            return
+        }
+
+        // An OIDC token is never stored, whatever the checkbox says.
+        let remember = credentialUseKeyAuth && credentialRemember
+        use(model: model, credential: value, remember: remember, authKind: selectedAuthKind)
+    }
+
+    /// Save an API key without switching, like ccswitch's manual key entry.
+    func saveCredentialOnly(for model: ModelProfile, value: String? = nil) {
+        let token = (value ?? credentialValue).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            credentialError = "Enter the API key first."
+            return
+        }
+        guard credentialUseKeyAuth else {
+            credentialError = "OIDC bearer tokens expire and are not stored. Switch with a fresh token instead."
+            return
+        }
+        guard let cli else {
+            cliMissing = true
+            return
+        }
+
+        let name = activeEnvironmentName
+        busy = "Saving"
+        credentialError = nil
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                try cli.setCredential(model: model.name, environment: name, token: token)
+                await MainActor.run {
+                    self.busy = nil
+                    self.credentialFor = nil
+                    self.credentialValue = ""
+                    self.credentialError = nil
+                    self.credentialSaveOnly = false
+                    self.toast = "Saved key for \(model.displayName)."
+                    self.refresh()
+                }
+            } catch {
+                await MainActor.run {
+                    self.busy = nil
+                    self.credentialError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func clearCredential(for model: ModelProfile) {
+        let name = activeEnvironmentName
+        perform("Clearing") { cli in
+            try cli.clearCredential(model: model.name, environment: name)
+        } then: { _ in
+            self.toast = "Removed key for \(model.displayName)."
             self.refresh()
         }
     }

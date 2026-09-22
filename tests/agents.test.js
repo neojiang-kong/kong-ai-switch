@@ -178,6 +178,87 @@ test("a token is written through for each agent", async () => {
   assert.doesNotMatch(codex, /consumer-key/);
 });
 
+test("a key-auth credential travels in its own header, not as a bearer token", async () => {
+  // Claude Code sends ANTHROPIC_AUTH_TOKEN as a bearer Authorization header,
+  // which a key-auth strategy ignores. The key must go via a custom header or
+  // the gateway answers 401.
+  const home = await scratchHome();
+  const keyAuthProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: { kind: "key-auth", header: "apikey" },
+    },
+  };
+
+  const result = await applyToAgent("claude-code", keyAuthProfile, { home, token: "my-key" });
+  const written = JSON.parse(await readFile(result.file, "utf8"));
+
+  assert.equal(written.env.ANTHROPIC_CUSTOM_HEADERS, "apikey: my-key");
+  // The key must not leak into the bearer token.
+  assert.notEqual(written.env.ANTHROPIC_AUTH_TOKEN, "my-key");
+  // But a non-empty token is still needed, or Claude Code uses its own creds.
+  assert.ok(written.env.ANTHROPIC_AUTH_TOKEN);
+});
+
+test("a custom key name is honoured in the header", async () => {
+  const home = await scratchHome();
+  const profile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: { required: true, preferred: { kind: "key-auth", header: "X-API-Key" } },
+  };
+  const result = await applyToAgent("claude-code", profile, { home, token: "k" });
+  const written = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(written.env.ANTHROPIC_CUSTOM_HEADERS, "X-API-Key: k");
+});
+
+test("an OIDC bearer token goes in ANTHROPIC_AUTH_TOKEN", async () => {
+  const home = await scratchHome();
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: { kind: "openid-connect", header: "Authorization" },
+    },
+  };
+
+  const result = await applyToAgent("claude-code", oidcProfile, { home, token: "bearer-xyz" });
+  const written = JSON.parse(await readFile(result.file, "utf8"));
+
+  assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, "bearer-xyz");
+  assert.equal(written.env.ANTHROPIC_CUSTOM_HEADERS, undefined);
+});
+
+test("a dual-strategy model honours an explicit OIDC choice", async () => {
+  const home = await scratchHome();
+  const dualProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      hasChoice: true,
+      preferred: { kind: "key-auth", header: "apikey" },
+      strategies: [
+        { kind: "key-auth", header: "apikey" },
+        { kind: "openid-connect", header: "Authorization" },
+      ],
+    },
+  };
+
+  const result = await applyToAgent("claude-code", dualProfile, {
+    home,
+    token: "bearer-xyz",
+    authKind: "openid-connect",
+  });
+  const written = JSON.parse(await readFile(result.file, "utf8"));
+
+  assert.equal(written.env.ANTHROPIC_AUTH_TOKEN, "bearer-xyz");
+  assert.equal(written.env.ANTHROPIC_CUSTOM_HEADERS, undefined);
+});
+
 test("agentStatus reads back what was written", async () => {
   const home = await scratchHome();
   await applyToAgent("claude-code", anthropicProfile, { home });

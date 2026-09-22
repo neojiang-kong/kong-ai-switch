@@ -75,6 +75,41 @@ public struct ClaudeCodeCompatibility: Codable, Hashable, Sendable {
     }
 }
 
+/// One AI Auth Strategy a model accepts.
+public struct AuthStrategy: Codable, Hashable, Sendable {
+    public let name: String?
+    public let displayName: String?
+    public let type: String?
+    public let kind: String
+    public let issuer: String?
+    public let header: String?
+    /// True for a long-lived key worth keeping in the Keychain. False for an
+    /// OIDC bearer token, which expires and would fail mid-session if stored.
+    public let storable: Bool
+    public let hint: String?
+
+    public var isKeyAuth: Bool { kind == "key-auth" }
+    public var isOIDC: Bool { kind == "openid-connect" }
+    public var label: String { displayName ?? name ?? kind }
+}
+
+/// How a client authenticates to a model.
+public struct ModelAuth: Codable, Hashable, Sendable {
+    public let required: Bool
+    public let kind: String?
+    public let strategies: [AuthStrategy]
+    public let preferred: AuthStrategy?
+    public let hasChoice: Bool?
+
+    /// A credential this tool can store, so the UI can offer to remember it.
+    public var acceptsStorableKey: Bool {
+        strategies.contains { $0.storable }
+    }
+
+    public var keyAuth: AuthStrategy? { strategies.first { $0.isKeyAuth } }
+    public var oidc: AuthStrategy? { strategies.first { $0.isOIDC } }
+}
+
 public struct ModelProfile: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let name: String
@@ -85,8 +120,11 @@ public struct ModelProfile: Codable, Identifiable, Hashable, Sendable {
     public let clientModelId: String
     public let targets: [Target]
     public let requiresAuth: Bool
+    public let auth: ModelAuth?
     public let claudeCode: ClaudeCodeCompatibility?
     public let active: Bool?
+    /// True when a storable key-auth credential exists in the Keychain.
+    public let hasCredential: Bool?
 
     /// Upstream vendor models behind this virtual model, for display.
     public var upstreamSummary: String {
@@ -102,6 +140,8 @@ public struct ModelList: Codable, Sendable {
     public let ok: Bool
     public let environment: String
     public let syncedAt: String?
+    public let totalCount: Int?
+    public let hiddenCount: Int?
     public let profiles: [ModelProfile]
 }
 
