@@ -191,9 +191,10 @@ public struct KongCLI: Sendable {
         try run(["agents"], as: AgentList.self).agents
     }
 
-    public func sync(environment: String?) throws -> SyncResult {
+    public func sync(environment: String?, proxyUrl: String? = nil) throws -> SyncResult {
         var args = ["sync"]
         if let environment { args += ["--env", environment] }
+        if let proxyUrl, !proxyUrl.isEmpty { args += ["--proxy-url", proxyUrl] }
         return try run(args, as: SyncResult.self)
     }
 
@@ -258,11 +259,15 @@ public struct KongCLI: Sendable {
     /// `env add`/`env set` have no JSON mode, so success is judged by exit
     /// status and stderr carries the message worth showing.
     public func saveEnvironment(
-        name: String, region: String, proxyUrl: String?, token: String?, isEditing: Bool
+        name: String, region: String, proxyUrl: String?, token: String?,
+        organizationName: String? = nil, isEditing: Bool
     ) throws {
         var args = [location.script.path, "env", isEditing ? "set" : "add", name, "--region", region]
         if let proxyUrl, !proxyUrl.isEmpty { args += ["--proxy-url", proxyUrl] }
         if let token, !token.isEmpty { args += ["--token", token] }
+        if let organizationName, !organizationName.isEmpty {
+            args += ["--organization-name", organizationName]
+        }
 
         let result = try runner.run(
             executable: location.node, arguments: args, environment: childEnvironment)

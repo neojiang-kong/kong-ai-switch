@@ -10,7 +10,7 @@
 
 import process from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
-import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS } from "../kong/client.js";
+import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS, fetchOrganization, slugifyEnvironmentName } from "../kong/client.js";
 import { buildProfiles, gatewayOrigin } from "../kong/models.js";
 import { authWithKind, AUTH_KIND } from "../kong/auth.js";
 import {
@@ -160,6 +160,8 @@ async function cmdEnvAdd(positional, flags) {
     proxyUrl: flags["proxy-url"],
     gateway: flags.gateway,
     description: typeof flags.description === "string" ? flags.description : undefined,
+    organizationName:
+      typeof flags["organization-name"] === "string" ? flags["organization-name"] : undefined,
     // Only keep the token in the file when no keychain took it.
     token: token && stored.inFile ? token : null,
   });
@@ -168,6 +170,9 @@ async function cmdEnvAdd(positional, flags) {
   process.stdout.write(`Added environment "${name}".\n`);
   process.stdout.write(`  region     ${next.environments[name].region}\n`);
   process.stdout.write(`  proxy URL  ${next.environments[name].proxyUrl ?? "(not set)"}\n`);
+  if (next.environments[name].organizationName) {
+    process.stdout.write(`  org        ${next.environments[name].organizationName}\n`);
+  }
   if (token) {
     process.stdout.write(
       stored.backend === BACKEND.KEYCHAIN
@@ -203,6 +208,8 @@ async function cmdEnvSet(positional, flags) {
     proxyUrl: flags["proxy-url"],
     gateway: flags.gateway,
     description: typeof flags.description === "string" ? flags.description : undefined,
+    organizationName:
+      typeof flags["organization-name"] === "string" ? flags["organization-name"] : undefined,
     token: token ? (stored.inFile ? token : null) : undefined,
   });
   await writeConfig(next);
@@ -211,6 +218,9 @@ async function cmdEnvSet(positional, flags) {
   const record = next.environments[name];
   process.stdout.write(`  region     ${record.region}\n`);
   process.stdout.write(`  proxy URL  ${record.proxyUrl ?? "(not set)"}\n`);
+  if (record.organizationName) {
+    process.stdout.write(`  org        ${record.organizationName}\n`);
+  }
   if (token) {
     process.stdout.write(
       stored.backend === BACKEND.KEYCHAIN
@@ -233,6 +243,8 @@ async function cmdEnvList(flags = {}) {
       const entry = environmentState(state, env.name);
       rows.push({
         name: env.name,
+        displayName: env.organizationName || env.description || env.name,
+        organizationName: env.organizationName ?? null,
         region: env.region,
         proxyUrl: env.proxyUrl ?? null,
         gateway: env.gateway ?? null,
@@ -569,6 +581,7 @@ async function cmdDiscover(flags) {
   const regions = flags.region ? [flags.region] : Object.keys(KONNECT_REGIONS);
   const found = [];
   const errors = [];
+  const organization = await fetchOrganization(token);
 
   for (const region of regions) {
     try {
@@ -600,7 +613,18 @@ async function cmdDiscover(flags) {
   }
 
   if (flags.json) {
-    emitJson({ ok: true, gateways: found, errors });
+    emitJson({
+      ok: true,
+      organization: organization
+        ? {
+            id: organization.id,
+            name: organization.name,
+            suggestedEnvironmentName: slugifyEnvironmentName(organization.name),
+          }
+        : null,
+      gateways: found,
+      errors,
+    });
     return;
   }
 
@@ -612,6 +636,9 @@ async function cmdDiscover(flags) {
     );
   }
 
+  if (organization?.name) {
+    process.stdout.write(`Organization: ${organization.name}\n`);
+  }
   process.stdout.write(`Found ${found.length} AI Gateway(s).\n\n`);
   for (const g of found) {
     process.stdout.write(`  ${g.displayName}\n`);
@@ -636,6 +663,16 @@ async function cmdSync(flags) {
   const client = new KongAiGatewayClient({ token, region: env.region });
   process.stderr.write(`Syncing "${env.name}" from ${client.baseUrl} (token: ${describeTokenSource(source)}) ...\n`);
 
+  // Keep the environment labelled by Konnect org name (not gateway slug).
+  const organization = await fetchOrganization(token);
+  if (organization?.name && organization.name !== env.organizationName) {
+    const config = await readConfig();
+    await writeConfig(
+      putEnvironment(config, { name: env.name, organizationName: organization.name }),
+    );
+    env.organizationName = organization.name;
+  }
+
   let gateways = await client.listGateways();
   const gatewayFilter = flags.gateway ?? env.gateway;
   if (gatewayFilter) {
@@ -655,10 +692,14 @@ async function cmdSync(flags) {
     );
   }
 
-  const origin = flags["proxy-url"] ?? process.env.KONNECT_PROXY_URL ?? env.proxyUrl ?? undefined;
+  // Per-gateway data plane: each AI Gateway may publish its own proxy_urls.
+  // A forced --proxy-url / KONNECT_PROXY_URL still overrides everything.
+  // env.proxyUrl is only the fallback when a gateway has nothing published.
+  const forced = flags["proxy-url"] ?? process.env.KONNECT_PROXY_URL ?? null;
   const profiles = [];
   const skipped = [];
   const summaries = [];
+  const gatewayRows = [];
 
   for (const gateway of gateways) {
     let models;
@@ -680,11 +721,21 @@ async function cmdSync(flags) {
       // they are just reported as needing auth, without the detail.
     }
 
+    const origin = forced ?? gatewayOrigin(gateway) ?? env.proxyUrl ?? undefined;
     const built = buildProfiles(models, gateway, { origin, strategiesByName });
     profiles.push(...built.profiles);
     skipped.push(...built.skipped);
+    gatewayRows.push({
+      id: gateway.id,
+      name: gateway.name,
+      displayName: gateway.display_name ?? gateway.name,
+      deploymentType: gateway.deployment_type ?? null,
+      proxyUrls: gateway.proxy_urls ?? [],
+      proxyUrl: origin ?? null,
+    });
     summaries.push(
-      `  ${gateway.display_name ?? gateway.name}: ${built.profiles.length} usable, ${built.skipped.length} skipped`,
+      `  ${gateway.display_name ?? gateway.name}: ${built.profiles.length} usable, ${built.skipped.length} skipped` +
+        (origin ? ` @ ${origin}` : ""),
     );
   }
 
@@ -693,13 +744,7 @@ async function cmdSync(flags) {
     putEnvironmentState(state, env.name, {
       syncedAt: new Date().toISOString(),
       region: env.region,
-      gateways: gateways.map((g) => ({
-        id: g.id,
-        name: g.name,
-        displayName: g.display_name ?? g.name,
-        deploymentType: g.deployment_type ?? null,
-        proxyUrls: g.proxy_urls ?? [],
-      })),
+      gateways: gatewayRows,
       profiles,
       current: environmentState(state, env.name).current,
     }),
@@ -745,19 +790,43 @@ async function cmdList(flags) {
     if (flags.json) throw new UserError(cause.message);
   }
 
+  // Active model is per agent: Claude Code's settings must not decide whether
+  // Codex's radio button is filled.
+  const agentPointed = await agentStatus(targetAgent).catch(() => null);
+
   const usable = entry.profiles.filter((p) => agentFormats.includes(p.format));
   const incompatible = entry.profiles.filter((p) => !agentFormats.includes(p.format));
   const shown = flags.all ? entry.profiles : usable;
 
+  function isActiveForAgent(p) {
+    if (agentPointed?.configured && agentPointed.model) {
+      const modelMatch =
+        agentPointed.model === p.clientModelId || agentPointed.model === p.name;
+      if (!modelMatch) return false;
+      if (agentPointed.baseUrl) {
+        return (
+          agentPointed.baseUrl === p.baseUrl ||
+          agentPointed.baseUrl.startsWith(p.baseUrl) ||
+          p.baseUrl.startsWith(agentPointed.baseUrl)
+        );
+      }
+      return true;
+    }
+    return Boolean(active && active.baseUrl === p.baseUrl && active.model === p.clientModelId);
+  }
+
   if (flags.json) {
+    // Always return every profile. The menu bar app filters by selected agent
+    // client-side; filtering here left Codex with "0 models" after a Claude
+    // Code refresh, so the user could not switch to anything else.
     const rows = await Promise.all(
-      shown.map(async (p) => {
+      entry.profiles.map(async (p) => {
         const storable = p.auth?.strategies?.some((s) => s.storable) ?? false;
         const hasCredential =
           storable && Boolean(await getModelCredential(env.name, p.name));
         return {
           ...p,
-          active: Boolean(active && active.baseUrl === p.baseUrl && active.model === p.clientModelId),
+          active: isActiveForAgent(p),
           hasCredential: storable ? hasCredential : null,
         };
       }),
@@ -768,7 +837,14 @@ async function cmdList(flags) {
       syncedAt: entry.syncedAt,
       agent: targetAgent,
       totalCount: entry.profiles.length,
-      hiddenCount: flags.all ? 0 : incompatible.length,
+      hiddenCount: incompatible.length,
+      gateways: (entry.gateways ?? []).map((g) => ({
+        id: g.id,
+        name: g.name,
+        displayName: g.displayName ?? g.name,
+        deploymentType: g.deploymentType ?? null,
+        proxyUrl: g.proxyUrl ?? null,
+      })),
       profiles: rows,
     });
     return;
@@ -962,6 +1038,10 @@ async function cmdUse(positional, flags) {
   process.stdout.write("\n");
   for (const a of applied) {
     process.stdout.write(`Wrote ${a.file}${a.created ? " (created)" : ""}.\n`);
+    if (a.envFile) {
+      process.stdout.write(`Wrote ${a.envFile}\n`);
+      process.stdout.write(`  source it before launching Copilot:  source ${a.envFile} && copilot\n`);
+    }
   }
   process.stdout.write(`Restart ${names} for the change to take effect.\n`);
 }
@@ -1018,12 +1098,14 @@ async function cmdAgents(flags = {}) {
     rows.push({
       id: agent.id,
       name: agent.name,
+      vendor: agent.vendor ?? null,
       formats: agent.formats,
       file: status.file,
       configured: status.configured,
       model: status.model ?? null,
       baseUrl: status.baseUrl ?? null,
       sharesConfigWith: agent.sharesConfigWith ?? null,
+      envFile: status.envFile ?? null,
     });
   }
 

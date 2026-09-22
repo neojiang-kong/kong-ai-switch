@@ -134,6 +134,11 @@ struct SetupView: View {
             if let gateway = state.selectedGateway {
                 discovered(gateway)
             }
+            if let org = state.discoveredOrganizationName {
+                Text("Organization: \(org)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
 
             field("Name") {
                 TextField("mine", text: $state.formName)
@@ -141,19 +146,18 @@ struct SetupView: View {
                     .disabled(isEditing)  // The CLI treats name as immutable.
             }
 
-            // Only ask for what could not be discovered.
-            if state.selectedGateway?.needsProxyUrl ?? true {
-                field("Data plane URL") {
-                    TextField("http://localhost:8000", text: $state.formProxyUrl)
-                        .textFieldStyle(.roundedBorder)
-                }
-                Text(
-                    "Kong could not tell us this: AI Gateway data planes run in your own infrastructure. Use the address your gateway listens on."
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            // Always editable. Discovery may prefill it, but the data plane is
+            // self-managed and often changes — hiding the field made edits impossible.
+            field("Data plane URL") {
+                TextField("https://ai.example.com:8443", text: $state.formProxyUrl)
+                    .textFieldStyle(.roundedBorder)
             }
+            Text(
+                "Fallback data plane for gateways that have not published proxy_urls in Konnect. Gateways with a published URL use that address instead."
+            )
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
 
             if isEditing {
                 field("Konnect token") {

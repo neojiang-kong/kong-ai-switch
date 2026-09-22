@@ -36,9 +36,9 @@ struct CredentialView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(state.credentialSaveOnly ? "Update key" : "Enter credential")
-                .font(.headline)
+                .font(.title3.weight(.semibold))
             Text(headerText)
-                .font(.system(size: 11))
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -50,6 +50,7 @@ struct CredentialView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .controlSize(.large)
             }
 
             if let strategy = chosen {
@@ -62,22 +63,23 @@ struct CredentialView: View {
 
             SecureField(usingKeyAuth ? "your API key" : "bearer token", text: $state.credentialValue)
                 .textFieldStyle(.roundedBorder)
+                .font(.system(size: 13))
                 .onSubmit { state.submitCredential(for: profile) }
 
             if usingKeyAuth {
                 Toggle("Remember in Keychain", isOn: $state.credentialRemember)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .toggleStyle(.checkbox)
             } else {
                 Text("Not stored: OIDC tokens expire, and a stale one fails mid-session.")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             if let error = state.credentialError {
                 Text(error)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -91,11 +93,11 @@ struct CredentialView: View {
                     actionButtons
                 }
             }
-            .controlSize(.small)
+            .controlSize(.regular)
             .padding(.top, 2)
         }
         .padding(14)
-        .frame(width: 340)
+        .frame(width: 380)
     }
 
     private var headerText: String {

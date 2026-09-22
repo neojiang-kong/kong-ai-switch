@@ -11,6 +11,8 @@ import SwiftUI
 final class AppState: ObservableObject {
     @Published var environments: [KongEnvironment] = []
     @Published var models: [ModelProfile] = []
+    @Published var gateways: [SyncedGateway] = []
+    @Published var selectedGatewayId: String? = nil
     @Published var status: StatusResult?
     @Published var busy: String?
     @Published var errorMessage: String?
@@ -37,6 +39,7 @@ final class AppState: ObservableObject {
     enum SetupStep { case token, chooseGateway, confirm }
     @Published var setupStep: SetupStep = .token
     @Published var discovered: [DiscoveredGateway] = []
+    @Published var discoveredOrganizationName: String?
     @Published var selectedGateway: DiscoveredGateway?
     @Published var discovering = false
 
@@ -54,7 +57,6 @@ final class AppState: ObservableObject {
     @Published var credentialRemember = true
     @Published var credentialSaveOnly = false
     @Published var credentialError: String?
-    @Published var hiddenModelCount = 0
 
     var selectedAgent: Agent? {
         agents.first { $0.id == selectedAgentId }
@@ -97,15 +99,49 @@ final class AppState: ObservableObject {
         return model.count > 18 ? String(model.prefix(17)) + "…" : model
     }
 
-    /// Models the selected agent can call. The CLI already filters by agent;
-    /// keep a local filter so a stale response cannot show unreachable ones.
+    /// Models on the selected gateway (or every gateway when none is chosen).
+    var modelsForGateway: [ModelProfile] {
+        guard let gatewayId = selectedGatewayId else { return models }
+        return models.filter { $0.gatewayId == gatewayId }
+    }
+
+    /// Models the selected agent can call on the selected gateway.
     var usableModels: [ModelProfile] {
+        let scoped = modelsForGateway
         guard let formats = selectedAgent?.formats, !formats.isEmpty else {
-            return models
+            return scoped
         }
-        let matched = models.filter { formats.contains($0.format) }
-        // If the CLI already filtered and every row matches, use that list as-is.
-        return matched.isEmpty ? models : matched
+        return scoped.filter { formats.contains($0.format) }
+    }
+
+    /// Models on this gateway that the selected agent cannot call.
+    var hiddenModelCount: Int {
+        max(0, modelsForGateway.count - usableModels.count)
+    }
+
+    var activeGateway: SyncedGateway? {
+        gateways.first { $0.id == selectedGatewayId }
+            ?? gatewaysWithModels.first { $0.id == selectedGatewayId }
+    }
+
+    /// Gateways that actually have models, for the picker.
+    var gatewaysWithModels: [SyncedGateway] {
+        let ids = Set(models.compactMap(\.gatewayId))
+        let fromSync = gateways.filter { ids.contains($0.id) }
+        if !fromSync.isEmpty { return fromSync }
+        // Fall back when state has models but no gateway catalogue yet.
+        return Dictionary(grouping: models, by: { $0.gatewayId ?? $0.gatewayName })
+            .compactMap { key, profiles -> SyncedGateway? in
+                guard let first = profiles.first else { return nil }
+                return SyncedGateway(
+                    id: first.gatewayId ?? key,
+                    name: first.gatewayName,
+                    displayName: first.gatewayName,
+                    deploymentType: nil,
+                    proxyUrl: nil
+                )
+            }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
     /// Total synced models in the active environment (from the last list call).
@@ -158,7 +194,6 @@ final class AppState: ObservableObject {
         }
         busy = "Loading"
         errorMessage = nil
-
         let agentId = selectedAgentId
 
         Task.detached(priority: .userInitiated) {
@@ -166,18 +201,21 @@ final class AppState: ObservableObject {
                 let envs = try cli.listEnvironments()
                 let active = envs.first(where: \.active)?.name
 
-                // With no environments, or one never synced, the CLI has
-                // nothing to list. That is a first-run state, not an error,
-                // so it must not put a red message on the welcome screen.
-                let list = envs.isEmpty ? nil : try? cli.listModels(environment: active, agent: agentId)
+                let list = envs.isEmpty
+                    ? nil
+                    : try? cli.listModels(environment: active, agent: agentId)
                 let models = list?.profiles ?? []
+                let gateways = list?.gateways ?? []
                 let status = try? cli.status()
                 let agents = (try? cli.listAgents()) ?? []
 
                 await MainActor.run {
                     self.environments = envs
                     self.models = models
-                    self.hiddenModelCount = list?.hiddenCount ?? max(0, (list?.totalCount ?? models.count) - models.count)
+                    self.gateways = gateways
+                    // Keep the current gateway if it still exists; otherwise
+                    // pick the one that owns the active model, or the first.
+                    self.ensureGatewaySelection(models: models, gateways: gateways, status: status)
                     self.status = status
                     self.agents = agents
                     self.errorMessage = nil
@@ -194,9 +232,14 @@ final class AppState: ObservableObject {
 
     func sync() {
         let name = activeEnvironmentName
+        // Do not force env.proxyUrl onto every gateway — each AI Gateway may
+        // publish its own data plane. env.proxyUrl is only a sync fallback.
         perform("Syncing") { cli in
             try cli.sync(environment: name)
         } then: { result in
+            if let name, let cli = self.cli {
+                repointAgents(cli: cli, environment: name)
+            }
             self.toast = "Synced \(result.modelCount) model\(result.modelCount == 1 ? "" : "s")."
             self.refresh()
         }
@@ -248,7 +291,8 @@ final class AppState: ObservableObject {
                     self.credentialValue = ""
                     self.credentialError = nil
                     self.credentialSaveOnly = false
-                    self.toast = "Now using \(result.displayName). Restart \(agentName)."
+                    self.toast = self.switchToast(
+                        displayName: result.displayName, agentId: agentId, agentName: agentName)
                     self.refresh()
                 }
             } catch {
@@ -360,11 +404,76 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Toast copy after a successful switch — Copilot needs a sourced env file.
+    private func switchToast(displayName: String, agentId: String, agentName: String) -> String {
+        if agentId == "github-copilot" {
+            return "Now using \(displayName). In a terminal: source ~/.copilot/kong-ai-switch.env && copilot"
+        }
+        return "Now using \(displayName). Restart \(agentName)."
+    }
+
+    /// Whether a model row should show as selected for the current agent.
+    ///
+    /// Compare against that agent's own status (not Claude Code's `active`
+    /// flag from `list`). Normalize trailing slashes so gateway URLs match.
+    func isModelActive(_ model: ModelProfile) -> Bool {
+        guard let agent = selectedAgent, agent.configured else {
+            return model.active ?? false
+        }
+        let modelMatch =
+            agent.model == model.clientModelId
+            || agent.model == model.name
+            || agent.model == model.displayName
+        guard modelMatch else { return false }
+        guard let rawBase = agent.baseUrl, !rawBase.isEmpty else { return true }
+        return Self.sameGatewayURL(rawBase, model.baseUrl)
+    }
+
+    /// Kong / Codex configs often differ by a trailing slash only.
+    private static func sameGatewayURL(_ a: String, _ b: String) -> Bool {
+        let left = a.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let right = b.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return left == right || left.hasPrefix(right) || right.hasPrefix(left)
+    }
+
     /// Change which agent the model list is scoped to.
+    ///
+    /// Re-lists so each model's `active` flag matches this agent.
     func selectAgent(_ id: String) {
         guard id != selectedAgentId else { return }
         selectedAgentId = id
         refresh()
+    }
+
+    /// Scope the model list to one AI Gateway control plane.
+    func selectGateway(_ id: String?) {
+        selectedGatewayId = id
+    }
+
+    /// Pick a sensible gateway after refresh without clobbering the user's choice.
+    private func ensureGatewaySelection(
+        models: [ModelProfile], gateways: [SyncedGateway], status: StatusResult?
+    ) {
+        let available = Set(models.compactMap(\.gatewayId))
+        if let current = selectedGatewayId, available.contains(current) { return }
+
+        // Prefer the gateway behind the model Claude Code is already using.
+        if let statusModel = status?.model,
+            let match = models.first(where: { $0.clientModelId == statusModel || $0.name == statusModel }),
+            let gid = match.gatewayId
+        {
+            selectedGatewayId = gid
+            return
+        }
+
+        // Else first gateway that has any model.
+        if let first = gateways.first(where: { available.contains($0.id) })?.id
+            ?? models.compactMap(\.gatewayId).first
+        {
+            selectedGatewayId = first
+        } else {
+            selectedGatewayId = nil
+        }
     }
 
     func switchEnvironment(to name: String) {
@@ -393,6 +502,7 @@ final class AppState: ObservableObject {
         formError = nil
         formSaving = false
         discovered = []
+        discoveredOrganizationName = nil
         selectedGateway = nil
         discovering = false
         // Editing skips discovery: the environment already exists and the
@@ -426,6 +536,7 @@ final class AppState: ObservableObject {
                 await MainActor.run {
                     self.discovering = false
                     self.discovered = result.gateways
+                    self.discoveredOrganizationName = result.organization?.name
 
                     if result.gateways.isEmpty {
                         self.formError =
@@ -453,8 +564,24 @@ final class AppState: ObservableObject {
         selectedGateway = gateway
         formRegion = gateway.region
         formProxyUrl = gateway.proxyUrl ?? ""
-        if formName.isEmpty { formName = gateway.suggestedEnvironmentName }
+        // Prefer the Konnect org name as the environment id — gateways already
+        // have their own picker. Falling back to the gateway slug is legacy.
+        if formName.isEmpty {
+            if let suggested = slugify(discoveredOrganizationName), !suggested.isEmpty {
+                formName = suggested
+            } else {
+                formName = gateway.suggestedEnvironmentName
+            }
+        }
         setupStep = .confirm
+    }
+
+    private func slugify(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        let cleaned = value.lowercased().replacingOccurrences(
+            of: "[^a-z0-9._-]", with: "-", options: .regularExpression)
+        let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(64))
     }
 
     func backToToken() {
@@ -475,6 +602,7 @@ final class AppState: ObservableObject {
         let region = formRegion
         let proxyUrl = formProxyUrl.trimmingCharacters(in: .whitespaces)
         let token = formToken.isEmpty ? nil : formToken
+        let organizationName = discoveredOrganizationName
 
         guard !name.isEmpty else {
             formError = "Give the environment a name."
@@ -499,11 +627,12 @@ final class AppState: ObservableObject {
             do {
                 try cli.saveEnvironment(
                     name: name, region: region, proxyUrl: proxyUrl,
-                    token: token, isEditing: isEditing
+                    token: token, organizationName: organizationName, isEditing: isEditing
                 )
-                // A new environment is useless until synced, so do it here
-                // rather than leaving the user an empty model list.
+                // Sync without forcing --proxy-url so each gateway keeps its
+                // own published data plane; env.proxyUrl is the fallback only.
                 let synced = try? cli.sync(environment: name)
+                repointAgents(cli: cli, environment: name)
 
                 await MainActor.run {
                     self.formSaving = false
@@ -529,4 +658,23 @@ final class AppState: ObservableObject {
     }
 
     func clearToast() { toast = nil }
+}
+
+/// Rewrite each configured agent's settings to the model's new base URL.
+/// Kept off `AppState` so detached tasks can call it without MainActor.
+private func repointAgents(cli: KongCLI, environment: String) {
+    let agents = (try? cli.listAgents()) ?? []
+    let models = (try? cli.listModels(environment: environment, agent: nil))?.profiles ?? []
+    for agent in agents where agent.configured {
+        guard let modelId = agent.model, !modelId.isEmpty else { continue }
+        guard
+            let profile = models.first(where: {
+                $0.clientModelId == modelId || $0.name == modelId || $0.displayName == modelId
+            })
+        else { continue }
+        // Re-use stored Keychain credentials; do not prompt.
+        _ = try? cli.use(
+            model: profile.name, environment: environment, agents: [agent.id],
+            credential: nil, save: false, authKind: nil)
+    }
 }

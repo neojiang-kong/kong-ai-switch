@@ -132,7 +132,7 @@ export async function writeConfig(config, file = configPath()) {
  * The token is handled by the caller via the secret store and is only kept
  * here when no keychain accepted it.
  */
-export function putEnvironment(config, { name, region, proxyUrl, gateway, token, description }) {
+export function putEnvironment(config, { name, region, proxyUrl, gateway, token, description, organizationName }) {
   const safeName = validateName(name);
   const next = { ...config, environments: { ...config.environments } };
 
@@ -144,6 +144,10 @@ export function putEnvironment(config, { name, region, proxyUrl, gateway, token,
     gateway: gateway === undefined ? (existing.gateway ?? null) : (gateway || null),
     description:
       description === undefined ? (existing.description ?? null) : (description || null),
+    organizationName:
+      organizationName === undefined
+        ? (existing.organizationName ?? null)
+        : (organizationName || null),
     createdAt: existing.createdAt ?? new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

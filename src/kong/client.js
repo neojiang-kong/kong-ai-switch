@@ -182,6 +182,51 @@ export class KongAiGatewayClient {
 }
 
 /**
+ * Resolve the Konnect organization that issued a personal access token.
+ *
+ * Identity lives on the global API (`/v3/organizations/me`), not the regional
+ * AI Gateway control plane. Used to label environments by org name rather than
+ * by whichever gateway happened to be picked during setup.
+ */
+export async function fetchOrganization(token, { timeoutMs = DEFAULT_TIMEOUT_MS, fetch: fetchImpl } = {}) {
+  if (!token || !String(token).trim()) return null;
+  const fetchFn = fetchImpl ?? globalThis.fetch;
+  const url = "https://global.api.konghq.com/v3/organizations/me";
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchFn(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${String(token).trim()}`,
+        Accept: "application/json, application/problem+json",
+      },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const body = await response.json();
+    const name = typeof body?.name === "string" ? body.name.trim() : "";
+    if (!name) return null;
+    return { id: body.id ?? null, name };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Turn an org or gateway display name into a safe environment id. */
+export function slugifyEnvironmentName(value) {
+  const cleaned = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+  return cleaned || "default";
+}
+
+/**
  * Turn an HTTP failure into a message that says what to do about it.
  * Konnect returns RFC 7807 problem documents, so prefer their detail text.
  */

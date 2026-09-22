@@ -55,10 +55,20 @@ test("proxy URLs are validated when the environment is defined", () => {
   assert.throws(() => validateProxyUrl("ftp://host"), ConfigError);
 });
 
+test("environments keep an organization display name", () => {
+  const config = putEnvironment(EMPTY, {
+    name: "mine",
+    region: "us",
+    organizationName: "Kong Care",
+  });
+  assert.equal(config.environments.mine.organizationName, "Kong Care");
+});
+
 test("the first environment added becomes active", () => {
   const config = putEnvironment(EMPTY, { name: "mine", region: "us" });
   assert.equal(config.active, "mine");
 });
+
 
 test("adding a second environment does not steal the active slot", () => {
   let config = putEnvironment(EMPTY, { name: "mine", region: "us" });

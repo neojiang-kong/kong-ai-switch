@@ -245,28 +245,34 @@ let agentJSON = """
 {
   "ok": true,
   "agents": [
-    {"id":"claude-code","name":"Claude Code","formats":["anthropic"],
+    {"id":"claude-code","name":"Claude Code","vendor":"anthropic","formats":["anthropic"],
      "file":"/Users/x/.claude/settings.json","configured":true,"model":"my-claude",
-     "baseUrl":"http://localhost:8000","sharesConfigWith":null},
-    {"id":"claude-desktop","name":"Claude Desktop","formats":["anthropic"],
+     "baseUrl":"http://localhost:8000","sharesConfigWith":null,"envFile":null},
+    {"id":"claude-desktop","name":"Claude Desktop","vendor":"anthropic","formats":["anthropic"],
      "file":"/Users/x/.claude/settings.json","configured":true,"model":"my-claude",
-     "baseUrl":"http://localhost:8000","sharesConfigWith":"claude-code"},
-    {"id":"codex","name":"Codex CLI","formats":["openai"],
+     "baseUrl":"http://localhost:8000","sharesConfigWith":"claude-code","envFile":null},
+    {"id":"codex","name":"Codex CLI","vendor":"openai","formats":["openai"],
      "file":"/Users/x/.codex/config.toml","configured":false,"model":null,
-     "baseUrl":null,"sharesConfigWith":null}
+     "baseUrl":null,"sharesConfigWith":null,"envFile":null},
+    {"id":"github-copilot","name":"GitHub Copilot","vendor":"github","formats":["openai","anthropic"],
+     "file":"/Users/x/.copilot/settings.json","configured":false,"model":null,
+     "baseUrl":null,"sharesConfigWith":null,"envFile":"/Users/x/.copilot/kong-ai-switch.env"}
   ]
 }
 """
 
 do {
     let agents = try makeCLI(StubRunner(stdout: agentJSON)).listAgents()
-    checkEqual("decodes three agents", agents.count, 3)
+    checkEqual("decodes four agents", agents.count, 4)
     checkEqual("Claude Code speaks anthropic", agents[0].formats, ["anthropic"])
     checkEqual("Codex speaks openai", agents[2].formats, ["openai"])
+    checkEqual("Copilot speaks openai and anthropic", agents[3].formats, ["openai", "anthropic"])
     checkEqual("a configured agent shows its model", agents[0].statusLabel, "my-claude")
     checkEqual("an unconfigured agent says so", agents[2].statusLabel, "not set")
     checkEqual("shared config is reported", agents[1].sharesConfigWith, "claude-code")
     checkEqual("a null model decodes as nil", agents[2].model, nil)
+    checkEqual("vendor survives", agents[0].vendor, "anthropic")
+    checkEqual("Copilot env file survives", agents[3].envFile, "/Users/x/.copilot/kong-ai-switch.env")
 } catch {
     check("agent decoding threw: \(error)", false)
 }

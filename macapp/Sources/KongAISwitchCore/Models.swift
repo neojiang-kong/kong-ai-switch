@@ -9,6 +9,10 @@ import Foundation
 
 public struct KongEnvironment: Codable, Identifiable, Hashable, Sendable {
     public let name: String
+    /// Human label for the Konnect organization, when known.
+    public let organizationName: String?
+    /// Prefer the org name in the UI; fall back to description, then the slug.
+    public let displayName: String?
     public let region: String
     public let proxyUrl: String?
     public let gateway: String?
@@ -21,6 +25,14 @@ public struct KongEnvironment: Codable, Identifiable, Hashable, Sendable {
 
     public var id: String { name }
 
+    /// What the ENVIRONMENT picker should show — org name, not a gateway slug.
+    public var label: String {
+        if let organizationName, !organizationName.isEmpty { return organizationName }
+        if let displayName, !displayName.isEmpty { return displayName }
+        if let description, !description.isEmpty { return description }
+        return name
+    }
+
     /// How to describe where this environment's token lives, in the UI's words.
     public var tokenLabel: String {
         switch tokenSource {
@@ -32,11 +44,14 @@ public struct KongEnvironment: Codable, Identifiable, Hashable, Sendable {
     }
 
     public init(
-        name: String, region: String, proxyUrl: String?, gateway: String?,
+        name: String, organizationName: String? = nil, displayName: String? = nil,
+        region: String, proxyUrl: String?, gateway: String?,
         description: String?, active: Bool, tokenSource: String, hasToken: Bool,
         modelCount: Int, syncedAt: String?
     ) {
         self.name = name
+        self.organizationName = organizationName
+        self.displayName = displayName
         self.region = region
         self.proxyUrl = proxyUrl
         self.gateway = gateway
@@ -114,6 +129,7 @@ public struct ModelProfile: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let name: String
     public let displayName: String
+    public let gatewayId: String?
     public let gatewayName: String
     public let format: String
     public let baseUrl: String
@@ -136,12 +152,34 @@ public struct ModelProfile: Codable, Identifiable, Hashable, Sendable {
     public var isUsable: Bool { claudeCode?.ok ?? true }
 }
 
+/// A gateway cached from the last sync, for the in-app picker.
+public struct SyncedGateway: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let displayName: String
+    public let deploymentType: String?
+    /// Data plane origin resolved for this gateway on the last sync.
+    public let proxyUrl: String?
+
+    public init(
+        id: String, name: String, displayName: String, deploymentType: String?,
+        proxyUrl: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.displayName = displayName
+        self.deploymentType = deploymentType
+        self.proxyUrl = proxyUrl
+    }
+}
+
 public struct ModelList: Codable, Sendable {
     public let ok: Bool
     public let environment: String
     public let syncedAt: String?
     public let totalCount: Int?
     public let hiddenCount: Int?
+    public let gateways: [SyncedGateway]?
     public let profiles: [ModelProfile]
 }
 
@@ -184,6 +222,8 @@ public struct StatusResult: Codable, Sendable {
 public struct Agent: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let name: String
+    /// Brand key for logos: anthropic, openai, github, kong, …
+    public let vendor: String?
     /// Kong model formats this agent can call.
     public let formats: [String]
     public let file: String
@@ -192,6 +232,8 @@ public struct Agent: Codable, Identifiable, Hashable, Sendable {
     public let baseUrl: String?
     /// Set when this agent writes the same file as another one.
     public let sharesConfigWith: String?
+    /// Extra env file Copilot needs sourced before launch.
+    public let envFile: String?
 
     public var statusLabel: String {
         configured ? (model ?? "configured") : "not set"
@@ -229,7 +271,13 @@ public struct DiscoverResult: Codable, Sendable {
         public let region: String
         public let error: String
     }
+    public struct Organization: Codable, Sendable {
+        public let id: String?
+        public let name: String?
+        public let suggestedEnvironmentName: String?
+    }
     public let ok: Bool
+    public let organization: Organization?
     public let gateways: [DiscoveredGateway]
     public let errors: [RegionError]
 }
