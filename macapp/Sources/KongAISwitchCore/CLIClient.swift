@@ -71,11 +71,15 @@ public enum CLIDiscovery {
     /// Where the CLI's entry script might live relative to an install root.
     public static func scriptCandidates(appSupport: String, home: String) -> [String] {
         [
+            // Preferred: copied next to the .app by build-app.sh (outside TCC).
             "\(appSupport)/KongAISwitch/cli/src/cli/index.js",
-            "\(home)/Documents/workplace/kong-ai-switch/src/cli/index.js",
+            // Common global npm installs.
             "/opt/homebrew/lib/node_modules/kong-ai-switch/src/cli/index.js",
             "/usr/local/lib/node_modules/kong-ai-switch/src/cli/index.js",
             "\(home)/.npm-global/lib/node_modules/kong-ai-switch/src/cli/index.js",
+            // Dev checkout checked out under the home directory.
+            "\(home)/kong-ai-switch/src/cli/index.js",
+            "\(home)/src/kong-ai-switch/src/cli/index.js",
         ]
     }
 

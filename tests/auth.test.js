@@ -29,7 +29,7 @@ const oidc = {
   display_name: "Keycloak",
   type: "openid-connect",
   config: {
-    issuer: "https://kong-care-keycloak.kongapj.com/realms/care",
+    issuer: "https://idp.example.com/realms/demo",
     auth_methods: ["bearer"],
   },
 };
@@ -62,7 +62,7 @@ test("an OIDC strategy is not storable and reports its issuer", () => {
   assert.equal(described.header, "Authorization");
   // Access tokens expire; a stored one would fail mid-session.
   assert.equal(described.storable, false);
-  assert.match(described.issuer, /realms\/care/);
+  assert.match(described.issuer, /realms\/demo/);
   assert.match(described.hint, /expires/);
 });
 
@@ -113,10 +113,10 @@ test("OIDC listed first still yields key-auth as preferred", () => {
 });
 
 test("a strategy that could not be read is still named", () => {
-  const model = { access: { auth_strategies: ["care-keycloak"] } };
+  const model = { access: { auth_strategies: ["missing-strategy"] } };
   const auth = describeModelAuth(model, new Map());
   assert.equal(auth.required, true);
-  assert.equal(auth.strategies[0].name, "care-keycloak");
+  assert.equal(auth.strategies[0].name, "missing-strategy");
   assert.equal(auth.strategies[0].kind, "unknown");
 });
 

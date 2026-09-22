@@ -213,7 +213,7 @@ test("Codex managed root keys sit at top; provider table at end (no open nested 
       'model_reasoning_effort = "low"',
       "disable_response_storage = true",
       "",
-      '[projects."/Users/neo/demo"]',
+      '[projects."/Users/example/demo"]',
       'trust_level = "trusted"',
       "",
     ].join("\n"),
@@ -232,7 +232,7 @@ test("Codex managed root keys sit at top; provider table at end (no open nested 
   const text = await readFile(result.file, "utf8");
 
   const rootBegin = text.indexOf("# >>> kong-ai-switch (managed) >>>");
-  const projectsAt = text.indexOf('[projects."/Users/neo/demo"]');
+  const projectsAt = text.indexOf('[projects."/Users/example/demo"]');
   const providerAt = text.indexOf("[model_providers.kong]");
   const providerBegin = text.indexOf("# >>> kong-ai-switch (managed-provider) >>>");
 

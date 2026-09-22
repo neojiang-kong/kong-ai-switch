@@ -29,6 +29,21 @@ Switched Claude Code to "Claude Opus (prod)".
 
 The API key never reaches the developer. Kong holds the upstream credential on the AI Model Provider entity and injects it, so rotating a vendor key touches one place rather than every laptop. In exchange you get token and cost accounting per team, rate limits and budgets, prompt guards and PII sanitisation, and failover across providers — all applied centrally to traffic the CLI is already sending.
 
+## Download (macOS menu bar app)
+
+Pre-built app (Apple Silicon / ad-hoc signed):
+
+- [`dist/KongAISwitch-macOS.zip`](dist/KongAISwitch-macOS.zip)
+
+Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized. The app needs **Node.js 20+**; it bundles a copy of the CLI under Application Support on first build/install from source.
+
+To rebuild the zip yourself:
+
+```bash
+cd macapp && ./build-app.sh release
+ditto -c -k --keepParent build/KongAISwitch.app ../dist/KongAISwitch-macOS.zip
+```
+
 ## Requirements
 
 - Node.js 20 or newer
