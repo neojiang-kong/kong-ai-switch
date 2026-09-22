@@ -86,6 +86,19 @@ function parseArgs(argv) {
 
 class UserError extends Error {}
 
+/**
+ * Emit a machine-readable result and stop.
+ *
+ * The SwiftUI app drives this CLI rather than reimplementing the Kong logic,
+ * so every command it calls needs a stable JSON shape. Human output stays on
+ * stdout as prose; --json replaces it entirely so a parser never has to strip
+ * decoration. Errors use the same envelope with ok:false, which means the app
+ * can surface a real message instead of a generic failure.
+ */
+function emitJson(payload) {
+  process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+}
+
 /** Load config and pick the environment a model command should act on. */
 async function activeEnvironment(flags) {
   const config = await readConfig();
@@ -182,9 +195,33 @@ async function cmdEnvSet(positional, flags) {
   process.stdout.write('\nRun "kong-ai-switch sync" to refresh models for this environment.\n');
 }
 
-async function cmdEnvList() {
+async function cmdEnvList(flags = {}) {
   const config = await readConfig();
   const environments = listEnvironments(config);
+
+  if (flags.json) {
+    const state = await readState();
+    const rows = [];
+    for (const env of environments) {
+      const { source } = await resolveToken(env);
+      const entry = environmentState(state, env.name);
+      rows.push({
+        name: env.name,
+        region: env.region,
+        proxyUrl: env.proxyUrl ?? null,
+        gateway: env.gateway ?? null,
+        description: env.description ?? null,
+        active: config.active === env.name,
+        tokenSource: source,
+        hasToken: source !== BACKEND.NONE,
+        modelCount: entry.profiles.length,
+        syncedAt: entry.syncedAt,
+      });
+    }
+    emitJson({ ok: true, active: config.active, environments: rows });
+    return;
+  }
+
   if (environments.length === 0) {
     process.stdout.write(
       "No environments defined.\n\n" +
@@ -433,6 +470,17 @@ async function cmdSync(flags) {
     }),
   );
 
+  if (flags.json) {
+    emitJson({
+      ok: true,
+      environment: env.name,
+      gatewayCount: gateways.length,
+      modelCount: profiles.length,
+      skipped: skipped.map((s) => ({ name: s.name, reason: s.reason })),
+    });
+    return;
+  }
+
   process.stdout.write(`Synced ${profiles.length} model(s) from ${gateways.length} gateway(s).\n`);
   for (const line of summaries) process.stdout.write(line + "\n");
 
@@ -454,7 +502,16 @@ async function cmdList(flags) {
   const entry = environmentState(state, env.name);
 
   if (flags.json) {
-    process.stdout.write(JSON.stringify(entry.profiles, null, 2) + "\n");
+    const active = await currentTarget();
+    emitJson({
+      ok: true,
+      environment: env.name,
+      syncedAt: entry.syncedAt,
+      profiles: entry.profiles.map((p) => ({
+        ...p,
+        active: Boolean(active && active.baseUrl === p.baseUrl && active.model === p.clientModelId),
+      })),
+    });
     return;
   }
 
@@ -554,6 +611,21 @@ async function cmdUse(positional, flags) {
   const result = await switchTo(profile, { token });
   await writeState(putEnvironmentState(state, env.name, { ...entry, current: profile.id }));
 
+  if (flags.json) {
+    emitJson({
+      ok: true,
+      environment: env.name,
+      model: profile.name,
+      displayName: profile.displayName,
+      baseUrl: profile.baseUrl,
+      clientModelId: profile.clientModelId,
+      gateway: profile.gatewayName,
+      settingsFile: result.file,
+      created: result.created,
+    });
+    return;
+  }
+
   process.stdout.write(`Switched Claude Code to "${profile.displayName}".\n`);
   process.stdout.write(`  environment  ${env.name}\n`);
   process.stdout.write(`  gateway      ${profile.gatewayName}\n`);
@@ -567,8 +639,38 @@ async function cmdUse(positional, flags) {
   process.stdout.write("Restart Claude Code for the change to take effect.\n");
 }
 
-async function cmdStatus() {
+async function cmdStatus(flags = {}) {
   const active = await currentTarget();
+
+  // Find which environment this came from, since settings.json does not say.
+  let origin = null;
+  if (active) {
+    const state = await readState();
+    for (const [envName, entry] of Object.entries(state.environments ?? {})) {
+      const match = (entry.profiles ?? []).find(
+        (p) => p.baseUrl === active.baseUrl && p.clientModelId === active.model,
+      );
+      if (match) {
+        origin = { environment: envName, gateway: match.gatewayName, model: match.name };
+        break;
+      }
+    }
+  }
+
+  if (flags.json) {
+    emitJson({
+      ok: true,
+      configured: Boolean(active),
+      settingsFile: claudeSettingsPath(),
+      baseUrl: active?.baseUrl ?? null,
+      model: active?.model ?? null,
+      hasToken: active?.hasToken ?? false,
+      environment: origin?.environment ?? null,
+      gateway: origin?.gateway ?? null,
+    });
+    return;
+  }
+
   if (!active) {
     process.stdout.write(`Claude Code is not pointed at a gateway.\n(${claudeSettingsPath()})\n`);
     return;
@@ -577,21 +679,10 @@ async function cmdStatus() {
   process.stdout.write(`base URL  ${active.baseUrl ?? "(unset)"}\n`);
   process.stdout.write(`model     ${active.model ?? "(unset)"}\n`);
   process.stdout.write(`token     ${active.hasToken ? "set" : "not set"}\n`);
-
-  // Find which environment this came from, across all of them, since the
-  // settings file does not record it.
-  const state = await readState();
-  for (const [envName, entry] of Object.entries(state.environments ?? {})) {
-    const match = (entry.profiles ?? []).find(
-      (p) => p.baseUrl === active.baseUrl && p.clientModelId === active.model,
-    );
-    if (match) {
-      process.stdout.write(`gateway   ${match.gatewayName}\n`);
-      process.stdout.write(`from      environment "${envName}"\n`);
-      return;
-    }
-  }
-  if (active.baseUrl) {
+  if (origin) {
+    process.stdout.write(`gateway   ${origin.gateway}\n`);
+    process.stdout.write(`from      environment "${origin.environment}"\n`);
+  } else if (active.baseUrl) {
     process.stdout.write("gateway   not a known Kong model (run sync to refresh)\n");
   }
 }
@@ -605,7 +696,7 @@ async function cmdEnv(positional, flags) {
       return cmdEnvSet(rest, flags);
     case "list":
     case undefined:
-      return cmdEnvList();
+      return cmdEnvList(flags);
     case "use":
       return cmdEnvUse(rest);
     case "show":
@@ -647,7 +738,7 @@ async function main() {
         await cmdUse(positional, flags);
         return 0;
       case "status":
-        await cmdStatus();
+        await cmdStatus(flags);
         return 0;
       default:
         process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
@@ -655,7 +746,9 @@ async function main() {
     }
   } catch (cause) {
     if (cause instanceof UserError || cause instanceof KongApiError || cause instanceof ConfigError) {
-      process.stderr.write(`${cause.message}\n`);
+      // Same envelope as success, so a caller parses one shape either way.
+      if (flags.json) emitJson({ ok: false, error: cause.message });
+      else process.stderr.write(`${cause.message}\n`);
       return 1;
     }
     throw cause;
