@@ -11,7 +11,7 @@
 import process from "node:process";
 import { readFile, writeFile } from "node:fs/promises";
 import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS } from "../kong/client.js";
-import { buildProfiles } from "../kong/models.js";
+import { buildProfiles, gatewayOrigin } from "../kong/models.js";
 import {
   readState,
   writeState,
@@ -35,6 +35,13 @@ import {
 } from "../config/environments.js";
 import { resolveToken, setToken, deleteToken, BACKEND } from "../config/secrets.js";
 import { switchTo, currentTarget, claudeSettingsPath } from "../config/claude.js";
+import {
+  listAgents,
+  getAgent,
+  applyToAgent,
+  agentStatus,
+  agentsForModel,
+} from "../config/agents.js";
 
 const USAGE = `kong-ai-switch — switch Claude Code between Kong AI Gateway models
 
@@ -49,9 +56,11 @@ Environments:
   kong-ai-switch env import <file> [--name <name>]
 
 Models:
+  kong-ai-switch discover --token <pat> [--region <r>]  find gateways from a token
   kong-ai-switch sync [--env <name>] [--gateway <id>]
   kong-ai-switch list [--env <name>] [--all] [--json]
-  kong-ai-switch use <model> [--env <name>] [--token <t>]
+  kong-ai-switch use <model> [--env <name>] [--agent <a,b>] [--token <t>]
+  kong-ai-switch agents                                 which agents, and where they point
   kong-ai-switch status
 
 Every model command takes --env to act on one environment without changing
@@ -397,6 +406,83 @@ async function cmdEnvImport(positional, flags) {
   }
 }
 
+/**
+ * Probe Konnect with nothing but a token and report what is there.
+ *
+ * This exists so a client can ask "what do I have?" before an environment
+ * exists. It tries each region until one answers, and reports each gateway's
+ * `proxy_urls` when the operator published them, so a UI can prefill the data
+ * plane address instead of demanding it up front.
+ *
+ * AI Gateway data planes are self-managed, so `proxy_urls` is often absent.
+ * That is reported honestly as needsProxyUrl rather than guessed at.
+ */
+async function cmdDiscover(flags) {
+  const token = flags.token ?? process.env.KONNECT_TOKEN;
+  if (!token) {
+    throw new UserError(
+      "A Konnect token is required.\n" +
+        "Generate one at https://cloud.konghq.com/global/account/tokens, then pass --token.",
+    );
+  }
+
+  // Search the region the caller named, else every region: an SE rarely
+  // knows offhand which one a customer's org lives in.
+  const regions = flags.region ? [flags.region] : Object.keys(KONNECT_REGIONS);
+  const found = [];
+  const errors = [];
+
+  for (const region of regions) {
+    try {
+      const client = new KongAiGatewayClient({ token, region });
+      const gateways = await client.listGateways();
+      for (const gateway of gateways) {
+        const origin = gatewayOrigin(gateway);
+        let modelCount = null;
+        try {
+          modelCount = (await client.listModels(gateway.id)).length;
+        } catch {
+          // A gateway we cannot read is still worth reporting.
+        }
+        found.push({
+          id: gateway.id,
+          name: gateway.name,
+          displayName: gateway.display_name ?? gateway.name,
+          region,
+          deploymentType: gateway.deployment_type ?? null,
+          proxyUrl: origin,
+          needsProxyUrl: origin === null,
+          modelCount,
+        });
+      }
+    } catch (cause) {
+      // 401 in one region just means the token is not for that region.
+      if (!/\b401\b/.test(cause.message)) errors.push({ region, error: cause.message });
+    }
+  }
+
+  if (flags.json) {
+    emitJson({ ok: true, gateways: found, errors });
+    return;
+  }
+
+  if (found.length === 0) {
+    throw new UserError(
+      "No AI Gateways found for that token in any region.\n" +
+        "Check the token is current, or create a gateway with:\n" +
+        "  curl -Ls https://get.konghq.com/ai | bash -s -- -k $KONNECT_TOKEN",
+    );
+  }
+
+  process.stdout.write(`Found ${found.length} AI Gateway(s).\n\n`);
+  for (const g of found) {
+    process.stdout.write(`  ${g.displayName}\n`);
+    process.stdout.write(`    region     ${g.region}\n`);
+    process.stdout.write(`    proxy URL  ${g.proxyUrl ?? "(not published; you must supply it)"}\n`);
+    if (g.modelCount !== null) process.stdout.write(`    models     ${g.modelCount}\n`);
+  }
+}
+
 async function cmdSync(flags) {
   const { env } = await activeEnvironment(flags);
   const { token, source } = await resolveToken(env);
@@ -521,8 +607,22 @@ async function cmdList(flags) {
   }
 
   const active = await currentTarget();
-  const usable = entry.profiles.filter((p) => p.claudeCode?.ok !== false);
-  const incompatible = entry.profiles.filter((p) => p.claudeCode?.ok === false);
+
+  // Usability is per agent: an openai-format model is unusable from Claude
+  // Code but is exactly what Codex needs, so filter by the agent in question.
+  const targetAgent = typeof flags.agent === "string" ? flags.agent.split(",")[0].trim() : "claude-code";
+  let agentFormats;
+  let agentName;
+  try {
+    const agent = getAgent(targetAgent);
+    agentFormats = agent.formats;
+    agentName = agent.name;
+  } catch (cause) {
+    throw new UserError(cause.message);
+  }
+
+  const usable = entry.profiles.filter((p) => agentFormats.includes(p.format));
+  const incompatible = entry.profiles.filter((p) => !agentFormats.includes(p.format));
   const shown = flags.all ? entry.profiles : usable;
 
   if (shown.length === 0) {
@@ -550,7 +650,7 @@ async function cmdList(flags) {
   const wFormat = width("format", "FORMAT");
   const wUpstream = width("upstream", "UPSTREAM");
 
-  process.stdout.write(`Environment: ${env.name}\n\n`);
+  process.stdout.write(`Environment: ${env.name}   Agent: ${agentName}\n\n`);
   process.stdout.write(
     `  ${"MODEL".padEnd(wName)}  ${"FORMAT".padEnd(wFormat)}  ${"UPSTREAM".padEnd(wUpstream)}  GATEWAY\n`,
   );
@@ -569,12 +669,14 @@ async function cmdList(flags) {
 
   if (!flags.all && incompatible.length > 0) {
     process.stdout.write(
-      `\n${incompatible.length} model(s) hidden: Claude Code cannot call them. Use --all for details.\n`,
+      `\n${incompatible.length} model(s) hidden: ${agentName} cannot call them. Use --all for details.\n`,
     );
   } else if (flags.all && incompatible.length > 0) {
-    process.stdout.write("\nNot usable from Claude Code:\n");
+    process.stdout.write(`\nNot usable from ${agentName}:\n`);
     for (const p of incompatible) {
-      process.stdout.write(`  ${p.name} — ${p.claudeCode.reason}\n`);
+      process.stdout.write(
+        `  ${p.name} — serves the "${p.format}" format; ${agentName} speaks ${agentFormats.join("/")}.\n`,
+      );
     }
   }
 
@@ -593,11 +695,30 @@ async function cmdUse(positional, flags) {
   const { profile, error } = resolveProfile(entry.profiles, positional[0]);
   if (error) throw new UserError(error);
 
-  if (profile.claudeCode?.ok === false) {
-    throw new UserError(
-      `Claude Code cannot call "${profile.name}": it ${profile.claudeCode.reason}\n` +
-        "Switching would point Claude Code at an endpoint that returns 404.",
-    );
+  // Which coding agents to point at this model. Default to Claude Code so
+  // existing behaviour is unchanged; --agent may be repeated or comma-listed.
+  const requestedAgents = flags.agent
+    ? String(flags.agent).split(",").map((a) => a.trim()).filter(Boolean)
+    : ["claude-code"];
+
+  // Check every requested agent against the model's format before writing
+  // anything, so a two-agent switch cannot half-apply.
+  for (const agentId of requestedAgents) {
+    let agent;
+    try {
+      agent = getAgent(agentId);
+    } catch (cause) {
+      throw new UserError(cause.message);
+    }
+    if (!agent.formats.includes(profile.format)) {
+      throw new UserError(
+        `${agent.name} cannot call "${profile.name}": it serves the "${profile.format}" format, ` +
+          `and ${agent.name} speaks ${agent.formats.join("/")}.\n` +
+          `Switching would point ${agent.name} at an endpoint that returns 404.\n` +
+          `To use this model from ${agent.name}, set the AI Model's formats[].type in Kong ` +
+          `(Kong still translates to whatever upstream provider it targets).`,
+      );
+    }
   }
 
   const token = flags.token ?? process.env.KONG_AI_TOKEN;
@@ -608,7 +729,19 @@ async function cmdUse(positional, flags) {
     );
   }
 
-  const result = await switchTo(profile, { token });
+  const applied = [];
+  for (const agentId of requestedAgents) {
+    const agent = getAgent(agentId);
+    // Claude Desktop shares Claude Code's file; writing twice is wasted work.
+    if (agent.sharesConfigWith && requestedAgents.includes(agent.sharesConfigWith)) continue;
+    try {
+      applied.push(await applyToAgent(agentId, profile, { token }));
+    } catch (cause) {
+      throw new UserError(cause.message);
+    }
+  }
+
+  const result = applied.find((a) => a.agent === "claude-code") ?? applied[0];
   await writeState(putEnvironmentState(state, env.name, { ...entry, current: profile.id }));
 
   if (flags.json) {
@@ -622,11 +755,13 @@ async function cmdUse(positional, flags) {
       gateway: profile.gatewayName,
       settingsFile: result.file,
       created: result.created,
+      agents: applied,
     });
     return;
   }
 
-  process.stdout.write(`Switched Claude Code to "${profile.displayName}".\n`);
+  const names = applied.map((a) => getAgent(a.agent).name).join(", ");
+  process.stdout.write(`Switched ${names} to "${profile.displayName}".\n`);
   process.stdout.write(`  environment  ${env.name}\n`);
   process.stdout.write(`  gateway      ${profile.gatewayName}\n`);
   process.stdout.write(`  base URL     ${profile.baseUrl}\n`);
@@ -635,8 +770,45 @@ async function cmdUse(positional, flags) {
     const upstream = profile.targets.map((t) => `${t.model} via ${t.provider}`).join(", ");
     process.stdout.write(`  upstream     ${upstream}\n`);
   }
-  process.stdout.write(`\nWrote ${result.file}${result.created ? " (created)" : ""}.\n`);
-  process.stdout.write("Restart Claude Code for the change to take effect.\n");
+  process.stdout.write("\n");
+  for (const a of applied) {
+    process.stdout.write(`Wrote ${a.file}${a.created ? " (created)" : ""}.\n`);
+  }
+  process.stdout.write(`Restart ${names} for the change to take effect.\n`);
+}
+
+/** List the coding agents this tool can configure, and where each points. */
+async function cmdAgents(flags = {}) {
+  const rows = [];
+  for (const agent of listAgents()) {
+    const status = await agentStatus(agent.id);
+    rows.push({
+      id: agent.id,
+      name: agent.name,
+      formats: agent.formats,
+      file: status.file,
+      configured: status.configured,
+      model: status.model ?? null,
+      baseUrl: status.baseUrl ?? null,
+      sharesConfigWith: agent.sharesConfigWith ?? null,
+    });
+  }
+
+  if (flags.json) {
+    emitJson({ ok: true, agents: rows });
+    return;
+  }
+
+  const width = (key, header) => Math.max(...rows.map((r) => String(r[key]).length), header.length);
+  const wId = width("id", "AGENT");
+  const wName = width("name", "NAME");
+
+  process.stdout.write(`  ${"AGENT".padEnd(wId)}  ${"NAME".padEnd(wName)}  POINTED AT\n`);
+  for (const r of rows) {
+    const target = r.configured ? (r.model ?? "configured") : "not configured";
+    process.stdout.write(`  ${r.id.padEnd(wId)}  ${r.name.padEnd(wName)}  ${target}\n`);
+  }
+  process.stdout.write('\nSwitch one or more with: kong-ai-switch use <model> --agent codex\n');
 }
 
 async function cmdStatus(flags = {}) {
@@ -728,6 +900,9 @@ async function main() {
       case "env":
         await cmdEnv(positional, flags);
         return 0;
+      case "discover":
+        await cmdDiscover(flags);
+        return 0;
       case "sync":
         await cmdSync(flags);
         return 0;
@@ -736,6 +911,9 @@ async function main() {
         return 0;
       case "use":
         await cmdUse(positional, flags);
+        return 0;
+      case "agents":
+        await cmdAgents(flags);
         return 0;
       case "status":
         await cmdStatus(flags);

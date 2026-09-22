@@ -27,10 +27,33 @@ final class AppState: ObservableObject {
     // ObservableObject needs no macro plugin and works the same way here.
     @Published var formName = ""
     @Published var formRegion = "us"
-    @Published var formProxyUrl = "http://localhost:8000"
+    @Published var formProxyUrl = ""
     @Published var formToken = ""
     @Published var formError: String?
     @Published var formSaving = false
+
+    /// Setup is token-first: paste a token, let Konnect answer what exists,
+    /// and only ask for what it could not tell us.
+    enum SetupStep { case token, chooseGateway, confirm }
+    @Published var setupStep: SetupStep = .token
+    @Published var discovered: [DiscoveredGateway] = []
+    @Published var selectedGateway: DiscoveredGateway?
+    @Published var discovering = false
+
+    /// Coding agents, and which one the model list is filtered for.
+    ///
+    /// One gateway serves many clients, but they do not all speak the same
+    /// protocol, so the model list is scoped to whichever agent is selected.
+    @Published var agents: [Agent] = []
+    @Published var selectedAgentId: String = "claude-code"
+
+    var selectedAgent: Agent? {
+        agents.first { $0.id == selectedAgentId }
+    }
+
+    var selectedAgentName: String {
+        selectedAgent?.name ?? "Claude Code"
+    }
 
     private var cli: KongCLI?
 
@@ -58,14 +81,22 @@ final class AppState: ObservableObject {
     /// makes the icon findable on a wide display where a bare glyph is not.
     var menuBarLabel: String {
         if cliMissing { return "Kong (setup)" }
-        guard let model = status?.model, status?.configured == true else { return "Kong" }
+        // Follow the selected agent so the bar matches what the panel shows.
+        let model = selectedAgent?.configured == true ? selectedAgent?.model : status?.model
+        guard let model, !model.isEmpty else { return "Kong" }
         // Long Kong model names would crowd the bar; trim with an ellipsis.
         return model.count > 18 ? String(model.prefix(17)) + "…" : model
     }
 
-    /// Models Claude Code can actually call.
+    /// Models the selected agent can actually call.
+    ///
+    /// The CLI already filters by agent, but an older cached response may
+    /// carry models in other formats, so filter here too.
     var usableModels: [ModelProfile] {
-        models.filter(\.isUsable)
+        guard let formats = selectedAgent?.formats, !formats.isEmpty else {
+            return models.filter(\.isUsable)
+        }
+        return models.filter { formats.contains($0.format) }
     }
 
     var hiddenModelCount: Int {
@@ -109,6 +140,8 @@ final class AppState: ObservableObject {
         busy = "Loading"
         errorMessage = nil
 
+        let agentId = selectedAgentId
+
         Task.detached(priority: .userInitiated) {
             do {
                 let envs = try cli.listEnvironments()
@@ -120,13 +153,15 @@ final class AppState: ObservableObject {
                 let models =
                     envs.isEmpty
                     ? []
-                    : ((try? cli.listModels(environment: active))?.profiles ?? [])
+                    : ((try? cli.listModels(environment: active, agent: agentId))?.profiles ?? [])
                 let status = try? cli.status()
+                let agents = (try? cli.listAgents()) ?? []
 
                 await MainActor.run {
                     self.environments = envs
                     self.models = models
                     self.status = status
+                    self.agents = agents
                     self.errorMessage = nil
                     self.busy = nil
                 }
@@ -151,12 +186,21 @@ final class AppState: ObservableObject {
 
     func use(model: ModelProfile) {
         let name = activeEnvironmentName
+        let agentId = selectedAgentId
+        let agentName = selectedAgentName
         perform("Switching") { cli in
-            try cli.use(model: model.name, environment: name)
+            try cli.use(model: model.name, environment: name, agents: [agentId])
         } then: { result in
-            self.toast = "Now using \(result.displayName). Restart Claude Code."
+            self.toast = "Now using \(result.displayName). Restart \(agentName)."
             self.refresh()
         }
+    }
+
+    /// Change which agent the model list is scoped to.
+    func selectAgent(_ id: String) {
+        guard id != selectedAgentId else { return }
+        selectedAgentId = id
+        refresh()
     }
 
     func switchEnvironment(to name: String) {
@@ -180,11 +224,78 @@ final class AppState: ObservableObject {
         editingEnvironment = editing
         formName = editing?.name ?? ""
         formRegion = editing?.region ?? "us"
-        formProxyUrl = editing?.proxyUrl ?? "http://localhost:8000"
+        formProxyUrl = editing?.proxyUrl ?? ""
         formToken = ""
         formError = nil
         formSaving = false
+        discovered = []
+        selectedGateway = nil
+        discovering = false
+        // Editing skips discovery: the environment already exists and the
+        // user is here to change one field.
+        setupStep = editing == nil ? .token : .confirm
         showingSetup = true
+    }
+
+    /// Ask Konnect what this token can see.
+    ///
+    /// This is the step that makes the token do the work: it finds the
+    /// gateways, their region, and their proxy URL when one is published,
+    /// so the user is never asked for something Kong already knows.
+    func discoverGateways() {
+        let token = formToken.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty else {
+            formError = "Paste your Konnect token first."
+            return
+        }
+        guard let cli else {
+            cliMissing = true
+            return
+        }
+
+        discovering = true
+        formError = nil
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try cli.discover(token: token, region: nil)
+                await MainActor.run {
+                    self.discovering = false
+                    self.discovered = result.gateways
+
+                    if result.gateways.isEmpty {
+                        self.formError =
+                            "That token works, but no AI Gateways were found in any region."
+                        return
+                    }
+                    // One gateway is the common case; skip the picker.
+                    if result.gateways.count == 1 {
+                        self.chooseGateway(result.gateways[0])
+                    } else {
+                        self.setupStep = .chooseGateway
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.discovering = false
+                    self.formError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Adopt a discovered gateway's details into the form.
+    func chooseGateway(_ gateway: DiscoveredGateway) {
+        selectedGateway = gateway
+        formRegion = gateway.region
+        formProxyUrl = gateway.proxyUrl ?? ""
+        if formName.isEmpty { formName = gateway.suggestedEnvironmentName }
+        setupStep = .confirm
+    }
+
+    func backToToken() {
+        setupStep = .token
+        formError = nil
     }
 
     func cancelSetup() {
@@ -203,6 +314,12 @@ final class AppState: ObservableObject {
 
         guard !name.isEmpty else {
             formError = "Give the environment a name."
+            return
+        }
+        // Without a data plane address a switch would point Claude Code at
+        // nothing, so refuse rather than write a broken environment.
+        if proxyUrl.isEmpty {
+            formError = "A data plane URL is needed, for example http://localhost:8000"
             return
         }
         guard let cli else {

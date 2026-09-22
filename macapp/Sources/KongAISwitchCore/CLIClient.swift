@@ -163,10 +163,18 @@ public struct KongCLI: Sendable {
         try run(["env", "list"], as: EnvironmentList.self).environments
     }
 
-    public func listModels(environment: String?) throws -> ModelList {
+    /// Models an agent can call. Usability is per agent: an openai-format
+    /// model is unreachable from Claude Code but is what Codex needs.
+    public func listModels(environment: String?, agent: String? = nil) throws -> ModelList {
         var args = ["list"]
         if let environment { args += ["--env", environment] }
+        if let agent { args += ["--agent", agent] }
         return try run(args, as: ModelList.self)
+    }
+
+    /// The coding agents this tool can configure, and where each points.
+    public func listAgents() throws -> [Agent] {
+        try run(["agents"], as: AgentList.self).agents
     }
 
     public func sync(environment: String?) throws -> SyncResult {
@@ -175,14 +183,28 @@ public struct KongCLI: Sendable {
         return try run(args, as: SyncResult.self)
     }
 
-    public func use(model: String, environment: String?) throws -> SwitchResult {
+    /// Point one or more agents at a model.
+    public func use(model: String, environment: String?, agents: [String] = []) throws
+        -> SwitchResult
+    {
         var args = ["use", model]
         if let environment { args += ["--env", environment] }
+        if !agents.isEmpty { args += ["--agent", agents.joined(separator: ",")] }
         return try run(args, as: SwitchResult.self)
     }
 
     public func status() throws -> StatusResult {
         try run(["status"], as: StatusResult.self)
+    }
+
+    /// Probe Konnect with only a token and report the gateways it finds.
+    ///
+    /// Searches every region unless one is named, since an engineer rarely
+    /// knows offhand which region a customer's org lives in.
+    public func discover(token: String, region: String?) throws -> DiscoverResult {
+        var args = ["discover", "--token", token]
+        if let region, !region.isEmpty { args += ["--region", region] }
+        return try run(args, as: DiscoverResult.self)
     }
 
     /// Create or update an environment.

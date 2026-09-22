@@ -218,6 +218,40 @@ do {
     check("status decoding threw: \(error)", false)
 }
 
+// MARK: - Agents
+
+section("Agents")
+
+let agentJSON = """
+{
+  "ok": true,
+  "agents": [
+    {"id":"claude-code","name":"Claude Code","formats":["anthropic"],
+     "file":"/Users/x/.claude/settings.json","configured":true,"model":"my-claude",
+     "baseUrl":"http://localhost:8000","sharesConfigWith":null},
+    {"id":"claude-desktop","name":"Claude Desktop","formats":["anthropic"],
+     "file":"/Users/x/.claude/settings.json","configured":true,"model":"my-claude",
+     "baseUrl":"http://localhost:8000","sharesConfigWith":"claude-code"},
+    {"id":"codex","name":"Codex CLI","formats":["openai"],
+     "file":"/Users/x/.codex/config.toml","configured":false,"model":null,
+     "baseUrl":null,"sharesConfigWith":null}
+  ]
+}
+"""
+
+do {
+    let agents = try makeCLI(StubRunner(stdout: agentJSON)).listAgents()
+    checkEqual("decodes three agents", agents.count, 3)
+    checkEqual("Claude Code speaks anthropic", agents[0].formats, ["anthropic"])
+    checkEqual("Codex speaks openai", agents[2].formats, ["openai"])
+    checkEqual("a configured agent shows its model", agents[0].statusLabel, "my-claude")
+    checkEqual("an unconfigured agent says so", agents[2].statusLabel, "not set")
+    checkEqual("shared config is reported", agents[1].sharesConfigWith, "claude-code")
+    checkEqual("a null model decodes as nil", agents[2].model, nil)
+} catch {
+    check("agent decoding threw: \(error)", false)
+}
+
 // MARK: - Error handling
 
 section("Error handling")

@@ -43,26 +43,26 @@ struct MenuView: View {
                 }
             }
 
-            if let status = state.status, status.configured {
+            // Follow the selected agent, not always Claude Code: with Codex
+            // selected, showing Claude Code's model would be a lie.
+            if let agent = state.selectedAgent, agent.configured {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
                         .font(.caption)
-                    Text(status.model ?? "unknown")
+                    Text(agent.model ?? "unknown")
                         .font(.caption)
                         .fontWeight(.medium)
-                    if let gateway = status.gateway {
-                        Text("via \(gateway)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text("· \(agent.name)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 HStack(spacing: 4) {
                     Image(systemName: "circle.dashed")
                         .foregroundStyle(.secondary)
                         .font(.caption)
-                    Text("Claude Code is not pointed at a gateway")
+                    Text("\(state.selectedAgentName) is not pointed at a gateway")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -76,6 +76,10 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 0) {
             if !state.environments.isEmpty {
                 environmentPicker
+                Divider()
+            }
+            if !state.agents.isEmpty {
+                agentPicker
                 Divider()
             }
             modelList
@@ -143,10 +147,62 @@ struct MenuView: View {
         }
     }
 
+    /// Which coding agent to configure.
+    ///
+    /// One gateway serves many clients, so this scopes both the model list
+    /// and the switch. Each row shows where that agent currently points, so
+    /// the whole picture is visible without opening three config files.
+    private var agentPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("CODING AGENT")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+
+            ForEach(state.agents) { agent in
+                Button {
+                    state.selectAgent(agent.id)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(
+                            systemName: agent.id == state.selectedAgentId
+                                ? "largecircle.fill.circle" : "circle"
+                        )
+                        .foregroundStyle(agent.id == state.selectedAgentId ? Color.accentColor : .secondary)
+                        .font(.caption)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(agent.name)
+                                .font(
+                                    .system(
+                                        size: 12,
+                                        weight: agent.id == state.selectedAgentId ? .medium : .regular))
+                            Text(agent.statusLabel)
+                                .font(.system(size: 10))
+                                .foregroundStyle(agent.configured ? .secondary : .tertiary)
+                        }
+                        Spacer()
+                        if agent.configured {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                .help("\(agent.name) speaks \(agent.formats.joined(separator: "/"))")
+            }
+            .padding(.bottom, 6)
+        }
+    }
+
     @ViewBuilder
     private var modelList: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("MODEL")
+            Text("MODEL FOR \(state.selectedAgentName.uppercased())")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
@@ -180,7 +236,7 @@ struct MenuView: View {
             }
 
             if state.hiddenModelCount > 0 {
-                Text("\(state.hiddenModelCount) model\(state.hiddenModelCount == 1 ? "" : "s") hidden: Claude Code cannot call them.")
+                Text("\(state.hiddenModelCount) model\(state.hiddenModelCount == 1 ? "" : "s") hidden: \(state.selectedAgentName) cannot call them.")
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

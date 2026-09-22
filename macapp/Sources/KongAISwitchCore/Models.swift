@@ -140,6 +140,60 @@ public struct StatusResult: Codable, Sendable {
     public let gateway: String?
 }
 
+/// A coding agent that can be pointed at a Kong AI Gateway.
+public struct Agent: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    /// Kong model formats this agent can call.
+    public let formats: [String]
+    public let file: String
+    public let configured: Bool
+    public let model: String?
+    public let baseUrl: String?
+    /// Set when this agent writes the same file as another one.
+    public let sharesConfigWith: String?
+
+    public var statusLabel: String {
+        configured ? (model ?? "configured") : "not set"
+    }
+}
+
+public struct AgentList: Codable, Sendable {
+    public let ok: Bool
+    public let agents: [Agent]
+}
+
+/// A gateway found by probing Konnect with only a token.
+public struct DiscoveredGateway: Codable, Identifiable, Hashable, Sendable {
+    public let id: String
+    public let name: String
+    public let displayName: String
+    public let region: String
+    public let deploymentType: String?
+    /// Present only when an operator published it; data planes are
+    /// self-managed, so Konnect often does not know the address.
+    public let proxyUrl: String?
+    public let needsProxyUrl: Bool
+    public let modelCount: Int?
+
+    /// A short suggestion for the environment name, derived from the gateway.
+    public var suggestedEnvironmentName: String {
+        let cleaned = name.lowercased().replacingOccurrences(
+            of: "[^a-z0-9._-]", with: "-", options: .regularExpression)
+        return cleaned.isEmpty ? "default" : cleaned
+    }
+}
+
+public struct DiscoverResult: Codable, Sendable {
+    public struct RegionError: Codable, Sendable {
+        public let region: String
+        public let error: String
+    }
+    public let ok: Bool
+    public let gateways: [DiscoveredGateway]
+    public let errors: [RegionError]
+}
+
 /// An error the CLI reported, carrying its message so the UI can show it.
 public struct CLIError: Error, LocalizedError, Sendable {
     public let message: String

@@ -58,6 +58,23 @@ enum LiveCheck {
                 : "not configured"
         }
 
+        // Discovery is the step that makes setup token-first, so check it
+        // resolves a gateway and its proxy URL from a token alone.
+        if let token = ProcessInfo.processInfo.environment["LIVE_TOKEN"] {
+            attempt("discover from token alone") {
+                let result = try cli.discover(
+                    token: token,
+                    region: ProcessInfo.processInfo.environment["LIVE_REGION"]
+                )
+                guard let first = result.gateways.first else {
+                    throw CLIError("no gateways discovered")
+                }
+                let proxy = first.proxyUrl ?? "none published"
+                return
+                    "\(result.gateways.count) gateway(s); first: \(first.displayName), proxy \(proxy)"
+            }
+        }
+
         // Exercise the create path the setup form uses. Only when asked, so
         // a plain live check never writes to the user's real config.
         if CommandLine.arguments.contains("--write") {
