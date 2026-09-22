@@ -2,6 +2,10 @@
 
 Switch Claude Code, Claude Desktop and Codex between the models your **Kong AI Gateway 2.0** serves, using Kong as the source of truth for what you are allowed to use.
 
+<p align="center">
+  <img src="docs/images/menu-panel.png" alt="Kong AI Switch menu bar panel" width="420" />
+</p>
+
 Inspired by [cc-switch](https://github.com/farion1231/cc-switch), which switches Claude Code between API vendors using a local list of providers. This tool replaces that local list with a live sync from Kong: the models you can switch to are the AI Models your platform team has published, with their policies, budgets and credentials already attached.
 
 Built for engineers who work across several Konnect orgs. Your own org, a shared demo org, and each customer are named **environments**, so moving between them is one command rather than re-exporting shell variables.

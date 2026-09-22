@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kong AI Switch</title>
+<style>
+  :root {
+    --bg: #f6f6f6;
+    --panel: rgba(246,246,246,0.96);
+    --line: rgba(0,0,0,0.10);
+    --text: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #007aff;
+    --green: #34c759;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    font: 13px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(1200px 600px at 20% 10%, #dfe8ff 0%, transparent 55%),
+      radial-gradient(900px 500px at 90% 80%, #e8f7e4 0%, transparent 50%),
+      #cfd6df;
+  }
+  .panel {
+    width: 380px;
+    background: var(--panel);
+    border-radius: 12px;
+    box-shadow:
+      0 0 0 0.5px rgba(0,0,0,0.18),
+      0 18px 50px rgba(0,0,0,0.22);
+    overflow: hidden;
+    backdrop-filter: blur(40px);
+  }
+  .header, .footer, .section { padding: 12px; }
+  .header { padding-bottom: 10px; }
+  .title-row { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
+  .status { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--text); font-size: 12px; }
+  .status .agent { color: var(--muted); }
+  .check { color: var(--green); font-size: 12px; }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
+  .label {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+    color: var(--muted); padding: 8px 12px 4px;
+  }
+  .row {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 5px 12px; cursor: default;
+  }
+  .row.model { padding: 6px 12px; }
+  .radio {
+    width: 14px; height: 14px; border-radius: 50%;
+    border: 1.5px solid #c7c7cc; margin-top: 2px; flex: none;
+    display: grid; place-items: center;
+  }
+  .radio.on {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 3.5px var(--accent);
+  }
+  .mark {
+    width: 20px; height: 20px; object-fit: contain; flex: none; margin-top: 1px;
+  }
+  .mark.sm { width: 16px; height: 16px; }
+  .col { min-width: 0; flex: 1; }
+  .name { font-size: 13px; font-weight: 500; }
+  .name.regular { font-weight: 400; }
+  .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+  .chips { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
+  .chip {
+    font-size: 10px; font-weight: 600; color: var(--muted);
+    background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 999px;
+  }
+  .chip.key { color: #248a3d; background: rgba(52,199,89,0.14); }
+  .tick { color: var(--green); font-size: 11px; margin-top: 3px; }
+  .footer { display: flex; align-items: center; gap: 8px; }
+  button {
+    appearance: none; border: 1px solid rgba(0,0,0,0.12);
+    background: #fff; border-radius: 6px; padding: 3px 10px;
+    font: inherit; font-size: 12px; color: var(--text);
+  }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+  <div class="panel" id="panel">
+    <div class="header">
+      <div class="title-row">
+        <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/kong-logomark.png" alt="" />
+        Kong AI Switch
+      </div>
+      <div class="status">
+        <img class="mark sm" src="../../macapp/Sources/KongAISwitch/Resources/claude.png" alt="" />
+        <span class="check">●</span>
+        <strong>claude-sonnet-4</strong>
+        <span class="agent">· Claude Code</span>
+      </div>
+    </div>
+    <hr />
+    <div class="label">ENVIRONMENT</div>
+    <div class="row">
+      <div class="radio on"></div>
+      <div class="col">
+        <div class="name">Acme Demo</div>
+        <div class="sub">us · 6 models · https://ai.example.com</div>
+      </div>
+    </div>
+    <hr />
+    <div class="label">AI GATEWAY</div>
+    <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/kong-logomark.png" alt="" />
+      <div class="radio on"></div>
+      <div class="col">
+        <div class="name">AI Gateway Production</div>
+        <div class="sub">4 models · https://ai.example.com</div>
+      </div>
+    </div>
+    <hr />
+    <div class="label">CODING AGENT</div>
+    <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/claude.png" alt="" />
+      <div class="radio on"></div>
+      <div class="col">
+        <div class="name">Claude Code <span class="chip">ANTHROPIC</span></div>
+        <div class="sub">claude-sonnet-4 · 2 models</div>
+      </div>
+      <span class="tick">✓</span>
+    </div>
+    <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/openai.png" alt="" />
+      <div class="radio"></div>
+      <div class="col">
+        <div class="name regular">Codex <span class="chip">OPENAI</span></div>
+        <div class="sub">not set · 2 models</div>
+      </div>
+    </div>
+    <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/github.png" alt="" />
+      <div class="radio"></div>
+      <div class="col">
+        <div class="name regular">GitHub Copilot <span class="chip">OPENAI</span></div>
+        <div class="sub">not set · 2 models</div>
+      </div>
+    </div>
+    <hr />
+    <div class="label">MODELS · AI GATEWAY PRODUCTION</div>
+    <div class="row model">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/anthropic.png" alt="" />
+      <div class="radio on" style="box-shadow:none;border:0;color:var(--accent);font-size:14px;line-height:14px">◉</div>
+      <div class="col">
+        <div class="name">Claude Sonnet 4</div>
+        <div class="sub">claude-sonnet-4</div>
+        <div class="chips"><span class="chip">ANTHROPIC</span><span class="chip key">KEY</span></div>
+      </div>
+    </div>
+    <div class="row model">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/openai.png" alt="" />
+      <div class="radio"></div>
+      <div class="col">
+        <div class="name regular">GPT-4.1</div>
+        <div class="sub">gpt-4.1</div>
+        <div class="chips"><span class="chip">OPENAI</span></div>
+      </div>
+    </div>
+    <hr />
+    <div class="footer">
+      <button>Sync</button>
+      <button>Refresh</button>
+      <div class="spacer"></div>
+      <button>Quit</button>
+    </div>
+  </div>
+</body>
+</html>
