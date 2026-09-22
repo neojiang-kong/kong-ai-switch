@@ -185,6 +185,47 @@ public struct KongCLI: Sendable {
         try run(["status"], as: StatusResult.self)
     }
 
+    /// Create or update an environment.
+    ///
+    /// `env add`/`env set` have no JSON mode, so success is judged by exit
+    /// status and stderr carries the message worth showing.
+    public func saveEnvironment(
+        name: String, region: String, proxyUrl: String?, token: String?, isEditing: Bool
+    ) throws {
+        var args = [location.script.path, "env", isEditing ? "set" : "add", name, "--region", region]
+        if let proxyUrl, !proxyUrl.isEmpty { args += ["--proxy-url", proxyUrl] }
+        if let token, !token.isEmpty { args += ["--token", token] }
+
+        let result = try runner.run(
+            executable: location.node, arguments: args, environment: childEnvironment)
+
+        if result.status != 0 {
+            let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+            let stdout = String(data: result.stdout, encoding: .utf8) ?? ""
+            let detail = stderr.isEmpty ? stdout : stderr
+            throw CLIError(
+                detail.isEmpty
+                    ? "Could not save \"\(name)\"."
+                    : detail.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    /// Remove an environment, its token and its cached models.
+    public func removeEnvironment(_ name: String) throws {
+        let result = try runner.run(
+            executable: location.node,
+            arguments: [location.script.path, "env", "remove", name],
+            environment: childEnvironment
+        )
+        if result.status != 0 {
+            let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+            throw CLIError(
+                stderr.isEmpty
+                    ? "Could not remove \"\(name)\"."
+                    : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
     /// Switch the active environment. This command has no JSON mode, so
     /// success is judged by exit status.
     public func useEnvironment(_ name: String) throws {

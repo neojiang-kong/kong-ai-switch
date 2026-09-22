@@ -13,6 +13,10 @@ struct MenuView: View {
         VStack(alignment: .leading, spacing: 0) {
             if state.cliMissing {
                 missingCLI
+            } else if state.showingSetup {
+                SetupView(state: state, editing: state.editingEnvironment)
+            } else if state.environments.isEmpty {
+                welcome
             } else {
                 header
                 Divider()
@@ -80,11 +84,21 @@ struct MenuView: View {
 
     private var environmentPicker: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("ENVIRONMENT")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
+            HStack {
+                Text("ENVIRONMENT")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    state.beginSetup()
+                } label: {
+                    Image(systemName: "plus").font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .help("Add an environment")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
 
             ForEach(state.environments) { env in
                 Button {
@@ -105,14 +119,25 @@ struct MenuView: View {
                             Image(systemName: "key.slash")
                                 .font(.system(size: 10))
                                 .foregroundStyle(.orange)
-                                .help("No token set for this environment")
+                                .help("No token set. Choose Edit to add one.")
                         }
+                        Button {
+                            state.beginSetup(editing: env)
+                        } label: {
+                            Image(systemName: "pencil").font(.system(size: 9))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Edit \(env.name)")
                     }
                     .contentShape(Rectangle())
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
+                .contextMenu {
+                    Button("Edit…") { state.beginSetup(editing: env) }
+                    Button("Remove", role: .destructive) { state.removeEnvironment(env.name) }
+                }
             }
             .padding(.bottom, 6)
         }
@@ -218,6 +243,38 @@ struct MenuView: View {
             .controlSize(.small)
             .padding(12)
         }
+    }
+
+    /// First run. The previous version pointed at a CLI command, which is a
+    /// dead end in an app whose purpose is not having to use one.
+    private var welcome: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Kong AI Switch")
+                .font(.headline)
+            Text(
+                "Connect a Kong AI Gateway to switch Claude Code between the models your platform team publishes."
+            )
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            if let error = state.errorMessage {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("Add environment") { state.beginSetup() }
+                    .keyboardShortcut(.defaultAction)
+                Spacer()
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+            }
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(14)
     }
 
     private var missingCLI: some View {
