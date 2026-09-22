@@ -315,10 +315,16 @@ struct MenuView: View {
             .fixedSize(horizontal: false, vertical: true)
 
             if let error = state.errorMessage {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                // Cap the height: an unexpected stack trace would otherwise
+                // push the buttons off the bottom of the panel.
+                ScrollView {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 140)
             }
 
             HStack {

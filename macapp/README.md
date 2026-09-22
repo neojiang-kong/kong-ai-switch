@@ -48,6 +48,20 @@ SwiftUI rendering. XCUITest also lives in Xcode, so there is no way to drive the
 
 To check the UI, open the app and confirm: the panel lists your environments with the active one marked, lists models for that environment, and that choosing one updates the header. `swift run KongAISwitchChecks --live ...` first will tell you whether the data underneath is sound, which separates a UI problem from a data problem.
 
+## macOS folder protection
+
+The app drives the `kong-ai-switch` CLI, and macOS will not let an unsigned app read `~/Documents`, `~/Desktop` or `~/Downloads`. A checkout in any of those works from your terminal but fails from the `.app` with `EPERM`.
+
+`build-app.sh` handles this by copying the CLI to `~/Library/Application Support/KongAISwitch/cli`, which is not protected, and the app looks there first. Re-run it after changing the CLI so the installed copy stays current.
+
+To see which copy the app would use:
+
+```bash
+swift run KongAISwitchChecks --which
+```
+
+It exits nonzero and says so when the path is one macOS protects.
+
 ## How it finds the CLI
 
 An app launched from Finder does not inherit your shell's PATH, so `node` is looked for explicitly in both Homebrew prefixes, `/usr/bin`, and the common version managers (nvm, Volta, asdf). The CLI script is looked for in Application Support, your workspace checkout, and the global npm roots.

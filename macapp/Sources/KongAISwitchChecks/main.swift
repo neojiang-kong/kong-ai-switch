@@ -8,8 +8,27 @@ import KongAISwitchCore
 /// executable instead: `swift run KongAISwitchChecks`. Same assertions, same
 /// nonzero exit on failure, no Xcode required.
 
-// `--live <script>` exercises the real CLI instead of stubs.
+// `--which` reports the CLI the app would actually use, which is the fastest
+// way to tell whether it resolved to a macOS-protected folder.
 let arguments = CommandLine.arguments
+if arguments.contains("--which") {
+    if let location = CLIDiscovery.locate() {
+        print("node:   \(location.node.path)")
+        print("script: \(location.script.path)")
+        let protectedRoots = ["/Documents/", "/Desktop/", "/Downloads/"]
+        if protectedRoots.contains(where: { location.script.path.contains($0) }) {
+            print("\nWARNING: that folder is protected by macOS; an unsigned app cannot read it.")
+            print("Run build-app.sh to install a copy to Application Support.")
+            exit(1)
+        }
+        print("\nReadable by the app.")
+        exit(0)
+    }
+    print("No CLI found.")
+    exit(1)
+}
+
+// `--live <script>` exercises the real CLI instead of stubs.
 if let liveIndex = arguments.firstIndex(of: "--live"), liveIndex + 1 < arguments.count {
     exit(LiveCheck.run(scriptPath: arguments[liveIndex + 1]))
 }
@@ -282,6 +301,29 @@ do {
     check("unparseable output should throw", false)
 } catch let error as CLIError {
     check("explains unreadable output", error.message.contains("Could not read"))
+} catch {
+    check("threw the wrong error type: \(error)", false)
+}
+
+// macOS blocks unsigned apps from ~/Documents. Node reports that as a raw
+// EPERM stack trace, which must be translated into something actionable.
+do {
+    _ = try makeCLI(
+        StubRunner(
+            stdout: "",
+            stderr: """
+            node:fs:436
+            Error: EPERM: operation not permitted, open '/Users/x/Documents/repo/src/cli/index.js'
+                at Object.readFileSync (node:fs:436:20)
+            """,
+            status: 1
+        )
+    ).listEnvironments()
+    check("an EPERM failure should throw", false)
+} catch let error as CLIError {
+    check("explains the macOS folder protection", error.message.contains("protected from unsigned apps"))
+    check("points at the fix", error.message.contains("build-app.sh"))
+    check("does not dump the stack trace", !error.message.contains("readFileSync"))
 } catch {
     check("threw the wrong error type: \(error)", false)
 }

@@ -55,6 +55,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
 
+# Install the CLI where the app can actually read it.
+#
+# macOS protects ~/Documents, ~/Desktop and ~/Downloads from unsigned apps
+# (TCC). A checkout in any of those is readable from your terminal but not
+# from the .app, which fails with EPERM. Application Support is not
+# protected, so the CLI is copied there and the app finds it first.
+CLI_SRC="$(cd "$ROOT/.." && pwd)"
+CLI_DEST="$HOME/Library/Application Support/KongAISwitch/cli"
+
+if [ -f "$CLI_SRC/src/cli/index.js" ]; then
+  echo "Installing CLI to Application Support ..."
+  rm -rf "$CLI_DEST"
+  mkdir -p "$CLI_DEST"
+  # Only what the CLI needs at runtime: no .git, no build output.
+  cp -R "$CLI_SRC/src" "$CLI_DEST/src"
+  [ -f "$CLI_SRC/package.json" ] && cp "$CLI_SRC/package.json" "$CLI_DEST/package.json"
+  echo "  $CLI_DEST"
+else
+  echo "warning: CLI source not found at $CLI_SRC/src/cli/index.js" >&2
+fi
+
 # Ad-hoc signature so macOS will run it locally without a developer account.
 codesign --force --deep --sign - "$APP" 2>/dev/null || \
   echo "note: could not codesign; the app still runs locally"

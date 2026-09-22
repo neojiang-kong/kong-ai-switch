@@ -137,6 +137,20 @@ public struct KongCLI: Sendable {
 
         guard !result.stdout.isEmpty else {
             let stderr = String(data: result.stderr, encoding: .utf8) ?? ""
+
+            // macOS protects ~/Documents, ~/Desktop and ~/Downloads from
+            // unsigned apps. A CLI checkout in one of those reads fine from a
+            // terminal but not from the .app, and Node reports it as a raw
+            // EPERM stack trace that explains nothing to the user.
+            if stderr.contains("EPERM") || stderr.contains("operation not permitted") {
+                throw CLIError(
+                    "macOS blocked this app from reading the CLI at \(location.script.path).\n\n"
+                        + "Folders like Documents and Desktop are protected from unsigned apps. "
+                        + "Re-run build-app.sh, which installs a copy to Application Support "
+                        + "where the app can read it."
+                )
+            }
+
             throw CLIError(
                 stderr.isEmpty
                     ? "kong-ai-switch produced no output (exit \(result.status))."
