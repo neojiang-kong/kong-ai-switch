@@ -4,16 +4,20 @@
  * Holds the model catalogue synced from Kong so `list` and `use` work
  * offline, plus which profile was last applied.
  *
- * Deliberately never stores the Konnect token: that comes from the
- * environment or the OS keychain, so a readable config file cannot leak
- * credentials for the whole organization.
+ * Catalogues are stored per environment. An SE who syncs a customer org
+ * should not lose the models already pulled for their own org, so each
+ * environment keeps its own entry and switching between them is instant.
+ *
+ * Deliberately never stores the Konnect token: that lives in the OS keychain
+ * or, failing that, the config file, so this cache cannot leak credentials
+ * for a whole organization.
  */
 
 import { readFile, writeFile, mkdir, rename, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
-const STATE_VERSION = 1;
+const STATE_VERSION = 2;
 
 export function stateDir(home = homedir()) {
   return path.join(home, ".kong-ai-switch");
@@ -25,6 +29,11 @@ export function statePath(home = homedir()) {
 
 const EMPTY = Object.freeze({
   version: STATE_VERSION,
+  environments: {},
+});
+
+/** A single environment's synced catalogue. */
+const EMPTY_ENTRY = Object.freeze({
   syncedAt: null,
   region: null,
   gateways: [],
@@ -32,23 +41,75 @@ const EMPTY = Object.freeze({
   current: null,
 });
 
-export async function readState(file = statePath()) {
+/**
+ * Carry a v1 state file forward.
+ *
+ * v1 held one flat catalogue with no notion of environments. Rather than
+ * discard a sync the user already paid for, file it under the environment
+ * they are using now.
+ */
+function migrate(parsed, fallbackEnv = "default") {
+  if (parsed?.version === STATE_VERSION && parsed.environments) return parsed;
+
+  if (Array.isArray(parsed?.profiles)) {
+    return {
+      version: STATE_VERSION,
+      environments: {
+        [fallbackEnv]: {
+          syncedAt: parsed.syncedAt ?? null,
+          region: parsed.region ?? null,
+          gateways: parsed.gateways ?? [],
+          profiles: parsed.profiles ?? [],
+          current: parsed.current ?? null,
+        },
+      },
+    };
+  }
+
+  return { ...EMPTY, environments: {} };
+}
+
+export async function readState(file = statePath(), { migrateInto = "default" } = {}) {
   let raw;
   try {
     raw = await readFile(file, "utf8");
   } catch (cause) {
-    if (cause?.code === "ENOENT") return { ...EMPTY };
+    if (cause?.code === "ENOENT") return { ...EMPTY, environments: {} };
     throw new Error(`Could not read ${file}: ${cause.message}`);
   }
 
   try {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return { ...EMPTY };
-    return { ...EMPTY, ...parsed };
+    if (!parsed || typeof parsed !== "object") return { ...EMPTY, environments: {} };
+    return migrate(parsed, migrateInto);
   } catch {
     // A corrupt cache is not worth failing over; it is rebuildable by `sync`.
-    return { ...EMPTY };
+    return { ...EMPTY, environments: {} };
   }
+}
+
+/** The catalogue for one environment, empty when never synced. */
+export function environmentState(state, envName) {
+  return { ...EMPTY_ENTRY, ...(state.environments?.[envName] ?? {}) };
+}
+
+/** Replace one environment's catalogue, leaving the others untouched. */
+export function putEnvironmentState(state, envName, entry) {
+  return {
+    ...state,
+    version: STATE_VERSION,
+    environments: {
+      ...(state.environments ?? {}),
+      [envName]: { ...EMPTY_ENTRY, ...entry },
+    },
+  };
+}
+
+/** Drop a cached catalogue, used when an environment is deleted. */
+export function dropEnvironmentState(state, envName) {
+  const environments = { ...(state.environments ?? {}) };
+  delete environments[envName];
+  return { ...state, environments };
 }
 
 export async function writeState(state, file = statePath()) {

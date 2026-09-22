@@ -2,36 +2,67 @@
 /**
  * kong-ai-switch — point Claude Code at models served by Kong AI Gateway 2.0.
  *
- *   sync    pull the model catalogue from Konnect
- *   list    show what you can switch to
- *   use     switch Claude Code to a model
- *   status  show where the CLI currently points
+ * Built for engineers who move between Konnect orgs: your own, a shared demo
+ * org, and whichever customer you are with today. Each is a named
+ * environment holding its region, data plane address and token, so switching
+ * is `env use <name>` rather than re-exporting shell variables.
  */
 
 import process from "node:process";
+import { readFile, writeFile } from "node:fs/promises";
 import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS } from "../kong/client.js";
 import { buildProfiles } from "../kong/models.js";
-import { readState, writeState, resolveProfile } from "../config/store.js";
+import {
+  readState,
+  writeState,
+  resolveProfile,
+  environmentState,
+  putEnvironmentState,
+  dropEnvironmentState,
+} from "../config/store.js";
+import {
+  readConfig,
+  writeConfig,
+  putEnvironment,
+  removeEnvironment,
+  setActive,
+  listEnvironments,
+  resolveEnvironment,
+  toShareable,
+  fromShareable,
+  ConfigError,
+  configPath,
+} from "../config/environments.js";
+import { resolveToken, setToken, deleteToken, BACKEND } from "../config/secrets.js";
 import { switchTo, currentTarget, claudeSettingsPath } from "../config/claude.js";
 
 const USAGE = `kong-ai-switch — switch Claude Code between Kong AI Gateway models
 
-Usage:
-  kong-ai-switch sync [--region <r>] [--gateway <id>] [--proxy-url <url>]
-  kong-ai-switch list [--json] [--verbose] [--all]
-  kong-ai-switch use <model> [--token <t>]
+Environments:
+  kong-ai-switch env add <name> --region <r> [--proxy-url <url>] [--token <pat>]
+  kong-ai-switch env list
+  kong-ai-switch env use <name>
+  kong-ai-switch env show [<name>]
+  kong-ai-switch env set <name> [--region <r>] [--proxy-url <url>] [--token <pat>]
+  kong-ai-switch env remove <name>
+  kong-ai-switch env export <name> [--out <file>]     share without credentials
+  kong-ai-switch env import <file> [--name <name>]
+
+Models:
+  kong-ai-switch sync [--env <name>] [--gateway <id>]
+  kong-ai-switch list [--env <name>] [--all] [--json]
+  kong-ai-switch use <model> [--env <name>] [--token <t>]
   kong-ai-switch status
 
-Environment:
-  KONNECT_TOKEN    Konnect personal access token (required for sync)
-  KONNECT_REGION   us (default), eu, au, me, in, sg, or a full control plane URL
-  KONNECT_PROXY_URL  data plane address, e.g. http://localhost:8000
-  KONG_AI_TOKEN    credential sent to the gateway when a model requires auth
+Every model command takes --env to act on one environment without changing
+the active one.
 
-AI Gateway data planes are self-managed, so Konnect often does not know their
-address. When a gateway publishes no proxy URL, supply one with --proxy-url.
+Environment variables (override the active environment):
+  KONNECT_TOKEN       Konnect personal access token
+  KONNECT_PROXY_URL   data plane address, e.g. http://localhost:8000
+  KONG_AI_TOKEN       credential for models behind an AI Auth Strategy
 
-Regions: ${Object.keys(KONNECT_REGIONS).join(", ")}
+Regions: ${Object.keys(KONNECT_REGIONS).join(", ")}, or a full control plane URL
 `;
 
 function parseArgs(argv) {
@@ -53,37 +84,317 @@ function parseArgs(argv) {
   return { command, flags, positional };
 }
 
-async function cmdSync(flags) {
-  const token = process.env.KONNECT_TOKEN;
-  if (!token) {
+class UserError extends Error {}
+
+/** Load config and pick the environment a model command should act on. */
+async function activeEnvironment(flags) {
+  const config = await readConfig();
+  const env = resolveEnvironment(config, flags.env);
+  return { config, env };
+}
+
+/**
+ * Store a token in the best available place and report where it went.
+ * Never claim keychain safety the platform did not actually provide.
+ */
+async function persistToken(name, token) {
+  const backend = await setToken(name, token);
+  return { backend, inFile: backend === BACKEND.FILE };
+}
+
+async function cmdEnvAdd(positional, flags) {
+  const name = positional[0];
+  if (!name) throw new UserError("Usage: kong-ai-switch env add <name> --region <region>");
+
+  const config = await readConfig();
+  if (config.environments[name] && !flags.force) {
+    throw new UserError(`"${name}" already exists. Use "env set" to change it, or --force to replace.`);
+  }
+
+  const token = typeof flags.token === "string" ? flags.token : null;
+  let stored = { backend: BACKEND.NONE, inFile: false };
+  if (token) stored = await persistToken(name, token);
+
+  const next = putEnvironment(config, {
+    name,
+    region: flags.region,
+    proxyUrl: flags["proxy-url"],
+    gateway: flags.gateway,
+    description: typeof flags.description === "string" ? flags.description : undefined,
+    // Only keep the token in the file when no keychain took it.
+    token: token && stored.inFile ? token : null,
+  });
+  await writeConfig(next);
+
+  process.stdout.write(`Added environment "${name}".\n`);
+  process.stdout.write(`  region     ${next.environments[name].region}\n`);
+  process.stdout.write(`  proxy URL  ${next.environments[name].proxyUrl ?? "(not set)"}\n`);
+  if (token) {
+    process.stdout.write(
+      stored.backend === BACKEND.KEYCHAIN
+        ? "  token      stored in the macOS Keychain\n"
+        : `  token      stored in ${configPath()} (owner-only; no keychain available)\n`,
+    );
+  }
+  if (next.active === name) process.stdout.write(`\n"${name}" is now the active environment.\n`);
+  if (!next.environments[name].proxyUrl) {
+    process.stdout.write(
+      "\nNo proxy URL set. AI Gateway data planes are self-managed, so one is usually needed:\n" +
+        `  kong-ai-switch env set ${name} --proxy-url http://localhost:8000\n`,
+    );
+  }
+}
+
+async function cmdEnvSet(positional, flags) {
+  const name = positional[0];
+  if (!name) throw new UserError("Usage: kong-ai-switch env set <name> [--region r] [--proxy-url u]");
+
+  const config = await readConfig();
+  if (!config.environments[name]) {
+    throw new UserError(`No environment named "${name}". Create it with "env add".`);
+  }
+
+  const token = typeof flags.token === "string" ? flags.token : null;
+  let stored = { backend: BACKEND.NONE, inFile: false };
+  if (token) stored = await persistToken(name, token);
+
+  const next = putEnvironment(config, {
+    name,
+    region: flags.region,
+    proxyUrl: flags["proxy-url"],
+    gateway: flags.gateway,
+    description: typeof flags.description === "string" ? flags.description : undefined,
+    token: token ? (stored.inFile ? token : null) : undefined,
+  });
+  await writeConfig(next);
+
+  process.stdout.write(`Updated "${name}".\n`);
+  const record = next.environments[name];
+  process.stdout.write(`  region     ${record.region}\n`);
+  process.stdout.write(`  proxy URL  ${record.proxyUrl ?? "(not set)"}\n`);
+  if (token) {
+    process.stdout.write(
+      stored.backend === BACKEND.KEYCHAIN
+        ? "  token      updated in the macOS Keychain\n"
+        : `  token      stored in ${configPath()} (owner-only; no keychain available)\n`,
+    );
+  }
+  process.stdout.write('\nRun "kong-ai-switch sync" to refresh models for this environment.\n');
+}
+
+async function cmdEnvList() {
+  const config = await readConfig();
+  const environments = listEnvironments(config);
+  if (environments.length === 0) {
+    process.stdout.write(
+      "No environments defined.\n\n" +
+        "  kong-ai-switch env add mine --region us --proxy-url http://localhost:8000\n",
+    );
+    return;
+  }
+
+  const state = await readState();
+  const rows = [];
+  for (const env of environments) {
+    const { source } = await resolveToken(env);
+    const entry = environmentState(state, env.name);
+    rows.push({
+      marker: config.active === env.name ? "*" : " ",
+      name: env.name,
+      region: env.region,
+      proxy: env.proxyUrl ?? "(not set)",
+      token: describeTokenSource(source),
+      models: entry.profiles.length ? String(entry.profiles.length) : "not synced",
+    });
+  }
+
+  const width = (key, header) => Math.max(...rows.map((r) => String(r[key]).length), header.length);
+  const wName = width("name", "ENVIRONMENT");
+  const wRegion = width("region", "REGION");
+  const wProxy = width("proxy", "PROXY URL");
+  const wToken = width("token", "TOKEN");
+
+  process.stdout.write(
+    `  ${"ENVIRONMENT".padEnd(wName)}  ${"REGION".padEnd(wRegion)}  ${"PROXY URL".padEnd(wProxy)}  ${"TOKEN".padEnd(wToken)}  MODELS\n`,
+  );
+  for (const r of rows) {
+    process.stdout.write(
+      `${r.marker} ${r.name.padEnd(wName)}  ${r.region.padEnd(wRegion)}  ${r.proxy.padEnd(wProxy)}  ${r.token.padEnd(wToken)}  ${r.models}\n`,
+    );
+  }
+  process.stdout.write(`\n* is the active environment. Config: ${configPath()}\n`);
+}
+
+function describeTokenSource(source) {
+  switch (source) {
+    case "KONNECT_TOKEN":
+      return "env var";
+    case BACKEND.KEYCHAIN:
+      return "keychain";
+    case BACKEND.FILE:
+      return "config file";
+    default:
+      return "missing";
+  }
+}
+
+async function cmdEnvUse(positional) {
+  const name = positional[0];
+  if (!name) throw new UserError("Usage: kong-ai-switch env use <name>");
+
+  const config = await readConfig();
+  const next = setActive(config, name);
+  await writeConfig(next);
+
+  const env = next.environments[name];
+  process.stdout.write(`Active environment is now "${name}".\n`);
+  process.stdout.write(`  region     ${env.region}\n`);
+  process.stdout.write(`  proxy URL  ${env.proxyUrl ?? "(not set)"}\n`);
+
+  const state = await readState();
+  const entry = environmentState(state, name);
+  process.stdout.write(
+    entry.profiles.length
+      ? `\n${entry.profiles.length} model(s) cached. Run "kong-ai-switch list" to see them.\n`
+      : '\nNo models cached yet. Run "kong-ai-switch sync".\n',
+  );
+}
+
+async function cmdEnvShow(positional, flags) {
+  const { config, env } = await activeEnvironment({ env: positional[0] ?? flags.env });
+  const { source } = await resolveToken(env);
+  const state = await readState();
+  const entry = environmentState(state, env.name);
+
+  process.stdout.write(`${env.name}${config.active === env.name ? "  (active)" : ""}\n`);
+  if (env.description) process.stdout.write(`  ${env.description}\n`);
+  process.stdout.write(`  region       ${env.region}\n`);
+  process.stdout.write(`  proxy URL    ${env.proxyUrl ?? "(not set)"}\n`);
+  if (env.gateway) process.stdout.write(`  gateway      ${env.gateway}\n`);
+  process.stdout.write(`  token        ${describeTokenSource(source)}\n`);
+  process.stdout.write(`  models       ${entry.profiles.length || "not synced"}\n`);
+  if (entry.syncedAt) process.stdout.write(`  last synced  ${entry.syncedAt}\n`);
+}
+
+async function cmdEnvRemove(positional, flags) {
+  const name = positional[0];
+  if (!name) throw new UserError("Usage: kong-ai-switch env remove <name>");
+
+  const config = await readConfig();
+  if (!config.environments[name]) throw new UserError(`No environment named "${name}".`);
+
+  const next = removeEnvironment(config, name);
+  await writeConfig(next);
+  await deleteToken(name);
+
+  const state = await readState();
+  await writeState(dropEnvironmentState(state, name));
+
+  process.stdout.write(`Removed "${name}" and its cached models.\n`);
+  if (next.active) process.stdout.write(`Active environment is now "${next.active}".\n`);
+  else process.stdout.write("No environments remain.\n");
+
+  // Say this plainly: we removed local config, not anything in Kong.
+  process.stdout.write("\nThis changed local configuration only. Nothing in Konnect was modified.\n");
+  void flags;
+}
+
+async function cmdEnvExport(positional, flags) {
+  const name = positional[0];
+  if (!name) throw new UserError("Usage: kong-ai-switch env export <name> [--out file]");
+
+  const config = await readConfig();
+  const env = config.environments[name];
+  if (!env) throw new UserError(`No environment named "${name}".`);
+
+  const body = JSON.stringify(toShareable(env), null, 2) + "\n";
+  const out = typeof flags.out === "string" ? flags.out : null;
+
+  if (out) {
+    await writeFile(out, body, { encoding: "utf8", mode: 0o644 });
+    process.stdout.write(`Wrote ${out}.\n`);
+    process.stdout.write("No credentials are included; the recipient supplies their own token.\n");
+  } else {
+    process.stdout.write(body);
+  }
+}
+
+async function cmdEnvImport(positional, flags) {
+  const file = positional[0];
+  if (!file) throw new UserError("Usage: kong-ai-switch env import <file> [--name <name>]");
+
+  let raw;
+  try {
+    raw = await readFile(file, "utf8");
+  } catch (cause) {
+    throw new UserError(`Could not read ${file}: ${cause.message}`);
+  }
+
+  const incoming = fromShareable(raw, { name: typeof flags.name === "string" ? flags.name : undefined });
+  const config = await readConfig();
+  if (config.environments[incoming.name] && !flags.force) {
     throw new UserError(
-      "KONNECT_TOKEN is not set.\n" +
-        "Generate a token at https://cloud.konghq.com/global/account/tokens then:\n" +
-        "  export KONNECT_TOKEN='kpat_...'",
+      `"${incoming.name}" already exists. Pass --name to import under a different name, or --force to replace.`,
     );
   }
 
-  const region = flags.region ?? process.env.KONNECT_REGION ?? "us";
-  const client = new KongAiGatewayClient({ token, region });
+  const token = typeof flags.token === "string" ? flags.token : null;
+  let stored = { backend: BACKEND.NONE, inFile: false };
+  if (token) stored = await persistToken(incoming.name, token);
 
-  process.stderr.write(`Syncing from ${client.baseUrl} ...\n`);
+  const next = putEnvironment(config, {
+    ...incoming,
+    token: token && stored.inFile ? token : null,
+  });
+  await writeConfig(next);
+
+  process.stdout.write(`Imported environment "${incoming.name}".\n`);
+  process.stdout.write(`  region     ${incoming.region}\n`);
+  process.stdout.write(`  proxy URL  ${incoming.proxyUrl ?? "(not set)"}\n`);
+
+  if (!token) {
+    process.stdout.write(
+      "\nNo token yet. Add yours before syncing:\n" +
+        `  kong-ai-switch env set ${incoming.name} --token kpat_...\n`,
+    );
+  }
+}
+
+async function cmdSync(flags) {
+  const { env } = await activeEnvironment(flags);
+  const { token, source } = await resolveToken(env);
+
+  if (!token) {
+    throw new UserError(
+      `No Konnect token for environment "${env.name}".\n` +
+        "Generate one at https://cloud.konghq.com/global/account/tokens then:\n" +
+        `  kong-ai-switch env set ${env.name} --token kpat_...`,
+    );
+  }
+
+  const client = new KongAiGatewayClient({ token, region: env.region });
+  process.stderr.write(`Syncing "${env.name}" from ${client.baseUrl} (token: ${describeTokenSource(source)}) ...\n`);
+
   let gateways = await client.listGateways();
-
-  if (flags.gateway) {
-    gateways = gateways.filter((g) => g.id === flags.gateway || g.name === flags.gateway);
+  const gatewayFilter = flags.gateway ?? env.gateway;
+  if (gatewayFilter) {
+    gateways = gateways.filter((g) => g.id === gatewayFilter || g.name === gatewayFilter);
     if (gateways.length === 0) {
-      throw new UserError(`No AI Gateway matched "${flags.gateway}" in region ${region}.`);
+      throw new UserError(`No AI Gateway matched "${gatewayFilter}" in region ${env.region}.`);
     }
   }
 
   if (gateways.length === 0) {
     throw new UserError(
-      `No AI Gateways found in region "${region}".\n` +
-        "If your gateway is in another region, pass --region, or create one with:\n" +
+      `No AI Gateways found in region "${env.region}".\n` +
+        "If the gateway is in another region, update the environment:\n" +
+        `  kong-ai-switch env set ${env.name} --region eu\n` +
+        "Or create one with:\n" +
         "  curl -Ls https://get.konghq.com/ai | bash -s -- -k $KONNECT_TOKEN",
     );
   }
 
+  const origin = flags["proxy-url"] ?? process.env.KONNECT_PROXY_URL ?? env.proxyUrl ?? undefined;
   const profiles = [];
   const skipped = [];
   const summaries = [];
@@ -97,29 +408,30 @@ async function cmdSync(flags) {
       summaries.push(`  ${gateway.display_name ?? gateway.name}: could not read models (${cause.message})`);
       continue;
     }
-    const origin = flags["proxy-url"] ?? process.env.KONNECT_PROXY_URL;
     const built = buildProfiles(models, gateway, { origin });
     profiles.push(...built.profiles);
-    skipped.push(...built.skipped.map((s) => ({ ...s, gateway: gateway.display_name ?? gateway.name })));
+    skipped.push(...built.skipped);
     summaries.push(
       `  ${gateway.display_name ?? gateway.name}: ${built.profiles.length} usable, ${built.skipped.length} skipped`,
     );
   }
 
   const state = await readState();
-  await writeState({
-    ...state,
-    syncedAt: new Date().toISOString(),
-    region,
-    gateways: gateways.map((g) => ({
-      id: g.id,
-      name: g.name,
-      displayName: g.display_name ?? g.name,
-      deploymentType: g.deployment_type ?? null,
-      proxyUrls: g.proxy_urls ?? [],
-    })),
-    profiles,
-  });
+  await writeState(
+    putEnvironmentState(state, env.name, {
+      syncedAt: new Date().toISOString(),
+      region: env.region,
+      gateways: gateways.map((g) => ({
+        id: g.id,
+        name: g.name,
+        displayName: g.display_name ?? g.name,
+        deploymentType: g.deployment_type ?? null,
+        proxyUrls: g.proxy_urls ?? [],
+      })),
+      profiles,
+      current: environmentState(state, env.name).current,
+    }),
+  );
 
   process.stdout.write(`Synced ${profiles.length} model(s) from ${gateways.length} gateway(s).\n`);
   for (const line of summaries) process.stdout.write(line + "\n");
@@ -131,39 +443,41 @@ async function cmdSync(flags) {
 
   if (profiles.length === 0) {
     process.stdout.write(
-      "\nNo switchable models. A model needs the \"generate\" capability and an enabled gateway with a proxy URL.\n",
+      '\nNo switchable models. A model needs the "generate" capability, and the gateway needs a reachable proxy URL.\n',
     );
   }
 }
 
 async function cmdList(flags) {
+  const { env } = await activeEnvironment(flags);
   const state = await readState();
+  const entry = environmentState(state, env.name);
+
   if (flags.json) {
-    process.stdout.write(JSON.stringify(state.profiles, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(entry.profiles, null, 2) + "\n");
     return;
   }
 
-  if (state.profiles.length === 0) {
-    process.stdout.write('No models cached. Run "kong-ai-switch sync" first.\n');
+  if (entry.profiles.length === 0) {
+    process.stdout.write(`No models cached for "${env.name}". Run "kong-ai-switch sync" first.\n`);
     return;
   }
 
   const active = await currentTarget();
-  const usable = state.profiles.filter((p) => p.claudeCode?.ok !== false);
-  const incompatible = state.profiles.filter((p) => p.claudeCode?.ok === false);
-  const shown = flags.all ? state.profiles : usable;
+  const usable = entry.profiles.filter((p) => p.claudeCode?.ok !== false);
+  const incompatible = entry.profiles.filter((p) => p.claudeCode?.ok === false);
+  const shown = flags.all ? entry.profiles : usable;
 
   if (shown.length === 0) {
     process.stdout.write("No models Claude Code can use.\n");
     if (incompatible.length > 0) {
-      process.stdout.write(`${incompatible.length} model(s) exist but serve another format. Use --all to see them.\n`);
+      process.stdout.write(`${incompatible.length} model(s) serve another format. Use --all to see them.\n`);
     }
     return;
   }
 
   const rows = shown.map((p) => {
-    const isActive =
-      active && active.baseUrl === p.baseUrl && active.model === p.clientModelId;
+    const isActive = active && active.baseUrl === p.baseUrl && active.model === p.clientModelId;
     const upstream = p.targets.map((t) => t.model).filter(Boolean).join(", ");
     return {
       marker: isActive ? "*" : " ",
@@ -174,11 +488,12 @@ async function cmdList(flags) {
     };
   });
 
-  const width = (key) => Math.max(...rows.map((r) => String(r[key]).length), key.length);
-  const wName = width("name");
-  const wFormat = width("format");
-  const wUpstream = width("upstream");
+  const width = (key, header) => Math.max(...rows.map((r) => String(r[key]).length), header.length);
+  const wName = width("name", "MODEL");
+  const wFormat = width("format", "FORMAT");
+  const wUpstream = width("upstream", "UPSTREAM");
 
+  process.stdout.write(`Environment: ${env.name}\n\n`);
   process.stdout.write(
     `  ${"MODEL".padEnd(wName)}  ${"FORMAT".padEnd(wFormat)}  ${"UPSTREAM".padEnd(wUpstream)}  GATEWAY\n`,
   );
@@ -206,16 +521,19 @@ async function cmdList(flags) {
     }
   }
 
-  if (state.syncedAt) process.stdout.write(`\nLast synced ${state.syncedAt}\n`);
+  if (entry.syncedAt) process.stdout.write(`\nLast synced ${entry.syncedAt}\n`);
 }
 
 async function cmdUse(positional, flags) {
+  const { env } = await activeEnvironment(flags);
   const state = await readState();
-  if (state.profiles.length === 0) {
-    throw new UserError('No models cached. Run "kong-ai-switch sync" first.');
+  const entry = environmentState(state, env.name);
+
+  if (entry.profiles.length === 0) {
+    throw new UserError(`No models cached for "${env.name}". Run "kong-ai-switch sync" first.`);
   }
 
-  const { profile, error } = resolveProfile(state.profiles, positional[0]);
+  const { profile, error } = resolveProfile(entry.profiles, positional[0]);
   if (error) throw new UserError(error);
 
   if (profile.claudeCode?.ok === false) {
@@ -234,15 +552,16 @@ async function cmdUse(positional, flags) {
   }
 
   const result = await switchTo(profile, { token });
-  await writeState({ ...state, current: profile.id });
+  await writeState(putEnvironmentState(state, env.name, { ...entry, current: profile.id }));
 
   process.stdout.write(`Switched Claude Code to "${profile.displayName}".\n`);
-  process.stdout.write(`  gateway   ${profile.gatewayName}\n`);
-  process.stdout.write(`  base URL  ${profile.baseUrl}\n`);
-  process.stdout.write(`  model     ${profile.clientModelId}\n`);
+  process.stdout.write(`  environment  ${env.name}\n`);
+  process.stdout.write(`  gateway      ${profile.gatewayName}\n`);
+  process.stdout.write(`  base URL     ${profile.baseUrl}\n`);
+  process.stdout.write(`  model        ${profile.clientModelId}\n`);
   if (profile.targets.length > 0) {
     const upstream = profile.targets.map((t) => `${t.model} via ${t.provider}`).join(", ");
-    process.stdout.write(`  upstream  ${upstream}\n`);
+    process.stdout.write(`  upstream     ${upstream}\n`);
   }
   process.stdout.write(`\nWrote ${result.file}${result.created ? " (created)" : ""}.\n`);
   process.stdout.write("Restart Claude Code for the change to take effect.\n");
@@ -255,22 +574,55 @@ async function cmdStatus() {
     return;
   }
 
-  const state = await readState();
-  const match = state.profiles.find(
-    (p) => p.baseUrl === active.baseUrl && p.clientModelId === active.model,
-  );
-
   process.stdout.write(`base URL  ${active.baseUrl ?? "(unset)"}\n`);
   process.stdout.write(`model     ${active.model ?? "(unset)"}\n`);
   process.stdout.write(`token     ${active.hasToken ? "set" : "not set"}\n`);
-  if (match) {
-    process.stdout.write(`gateway   ${match.gatewayName}\n`);
-  } else if (active.baseUrl) {
+
+  // Find which environment this came from, across all of them, since the
+  // settings file does not record it.
+  const state = await readState();
+  for (const [envName, entry] of Object.entries(state.environments ?? {})) {
+    const match = (entry.profiles ?? []).find(
+      (p) => p.baseUrl === active.baseUrl && p.clientModelId === active.model,
+    );
+    if (match) {
+      process.stdout.write(`gateway   ${match.gatewayName}\n`);
+      process.stdout.write(`from      environment "${envName}"\n`);
+      return;
+    }
+  }
+  if (active.baseUrl) {
     process.stdout.write("gateway   not a known Kong model (run sync to refresh)\n");
   }
 }
 
-class UserError extends Error {}
+async function cmdEnv(positional, flags) {
+  const [sub, ...rest] = positional;
+  switch (sub) {
+    case "add":
+      return cmdEnvAdd(rest, flags);
+    case "set":
+      return cmdEnvSet(rest, flags);
+    case "list":
+    case undefined:
+      return cmdEnvList();
+    case "use":
+      return cmdEnvUse(rest);
+    case "show":
+      return cmdEnvShow(rest, flags);
+    case "remove":
+    case "rm":
+      return cmdEnvRemove(rest, flags);
+    case "export":
+      return cmdEnvExport(rest, flags);
+    case "import":
+      return cmdEnvImport(rest, flags);
+    default:
+      throw new UserError(
+        `Unknown "env" subcommand "${sub}". Try: add, set, list, use, show, remove, export, import.`,
+      );
+  }
+}
 
 async function main() {
   const { command, flags, positional } = parseArgs(process.argv.slice(2));
@@ -282,6 +634,9 @@ async function main() {
 
   try {
     switch (command) {
+      case "env":
+        await cmdEnv(positional, flags);
+        return 0;
       case "sync":
         await cmdSync(flags);
         return 0;
@@ -299,7 +654,7 @@ async function main() {
         return 2;
     }
   } catch (cause) {
-    if (cause instanceof UserError || cause instanceof KongApiError) {
+    if (cause instanceof UserError || cause instanceof KongApiError || cause instanceof ConfigError) {
       process.stderr.write(`${cause.message}\n`);
       return 1;
     }
