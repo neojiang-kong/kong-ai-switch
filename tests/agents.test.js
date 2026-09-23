@@ -605,7 +605,54 @@ test("Claude Desktop OIDC uses interactive browser login with issuer", async () 
   assert.equal(body.inferenceGatewayOidc.issuer, "https://idp.example.com/realms/demo");
   assert.equal(body.inferenceGatewayOidc.clientId, "claude-desktop");
   assert.equal(body.inferenceGatewayOidc.redirectPort, 53180);
-  assert.equal(body.inferenceGatewayApiKey, "eyJ-access");
+  // Interactive must not also set a static API key — that breaks Desktop's 3P UI.
+  assert.equal(body.inferenceGatewayApiKey, undefined);
+  assert.equal(body.inferenceGatewayAuthScheme, undefined);
+});
+
+test("Claude Desktop Entra OIDC takes client id from JWT azp, never claude-desktop", async () => {
+  const home = await scratchHome();
+  // Minimal unsigned JWT payload for the test: {"azp":"20167183-7ef7-48f2-9763-1d30199e32a9"}
+  const payload = Buffer.from(
+    JSON.stringify({ azp: "20167183-7ef7-48f2-9763-1d30199e32a9" }),
+  ).toString("base64url");
+  const token = `hdr.${payload}.sig`;
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        header: "Authorization",
+        issuer: "https://login.microsoftonline.com/f177c1d6-50cf-49e0-818a-a0585cbafd8d/v2.0",
+      },
+    },
+  };
+
+  const result = await applyToAgent("claude-desktop", oidcProfile, { home, token });
+  const body = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(body.inferenceGatewayOidc.clientId, "20167183-7ef7-48f2-9763-1d30199e32a9");
+  assert.equal(body.inferenceGatewayApiKey, undefined);
+});
+
+test("Claude Desktop Entra OIDC without client id fails clearly", async () => {
+  const home = await scratchHome();
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        issuer: "https://login.microsoftonline.com/tenant/v2.0",
+      },
+    },
+  };
+  await assert.rejects(
+    () => applyToAgent("claude-desktop", oidcProfile, { home }),
+    /KONG_AI_OIDC_CLIENT_ID/,
+  );
 });
 
 test("malformed JSON is refused rather than overwritten", async () => {

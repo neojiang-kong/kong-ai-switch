@@ -268,7 +268,8 @@ public struct KongCLI: Sendable {
         agents: [String] = [],
         credential: String? = nil,
         save: Bool = true,
-        authKind: String? = nil
+        authKind: String? = nil,
+        oidcClientId: String? = nil
     ) throws -> SwitchResult {
         var args = ["use", model]
         if let environment { args += ["--env", environment] }
@@ -276,6 +277,9 @@ public struct KongCLI: Sendable {
         if let credential, !credential.isEmpty { args += ["--token", credential] }
         if !save { args += ["--save", "false"] }
         if let authKind, !authKind.isEmpty { args += ["--auth", authKind] }
+        if let oidcClientId, !oidcClientId.isEmpty {
+            args += ["--oidc-client-id", oidcClientId]
+        }
         return try run(args, as: SwitchResult.self)
     }
 

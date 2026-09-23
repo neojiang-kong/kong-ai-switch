@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+### Fixes
+- **Claude Desktop 3P settings page** no longer breaks after a Kong AI Switch: interactive OIDC profiles no longer also write `inferenceGatewayApiKey` (mixed modes make Configure Third-Party Inference fail to load).
+- Entra (Microsoft) OIDC uses the real Application (client) ID (`azp` / `--oidc-client-id` / `KONG_AI_OIDC_CLIENT_ID`), not the Keycloak-style `claude-desktop` string.
+
 ## 0.2.1
 
 ### Fixes

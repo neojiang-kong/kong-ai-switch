@@ -270,7 +270,13 @@ final class AppState: ObservableObject {
 
     /// Switch to a model. Opens the in-app credential form when auth is needed
     /// and nothing is stored yet — never sends the user to the CLI.
-    func use(model: ModelProfile, credential: String? = nil, remember: Bool = false, authKind: String? = nil) {
+    func use(
+        model: ModelProfile,
+        credential: String? = nil,
+        remember: Bool = false,
+        authKind: String? = nil,
+        oidcClientId: String? = nil
+    ) {
         // Ask in the UI first. Round-tripping to the CLI just to learn a key
         // is missing would put a red error on screen before the prompt.
         if credential == nil, needsCredentialPrompt(model) {
@@ -282,6 +288,11 @@ final class AppState: ObservableObject {
         let agentId = selectedAgentId
         let agentName = selectedAgentName
         let kind = authKind ?? (credential == nil ? nil : selectedAuthKind)
+        // Prefer an explicit id (browser login), then UserDefaults, then azp from a pasted JWT.
+        let clientId =
+            oidcClientId
+            ?? UserDefaults.standard.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
+            ?? Self.clientIdFromJwt(credential)
 
         guard let cli else {
             cliMissing = true
@@ -294,7 +305,8 @@ final class AppState: ObservableObject {
             do {
                 let result = try cli.use(
                     model: model.name, environment: name, agents: [agentId],
-                    credential: credential, save: remember, authKind: kind
+                    credential: credential, save: remember, authKind: kind,
+                    oidcClientId: clientId
                 )
                 await MainActor.run {
                     self.busy = nil
@@ -356,20 +368,29 @@ final class AppState: ObservableObject {
     /// Public-client id for interactive OIDC (not the Kong gateway client).
     ///
     /// Claude Desktop registers `claude-desktop` with
-    /// `http://127.0.0.1:53180/callback` — reuse that when the selected agent
-    /// is Claude so the same Keycloak client works. Override with
-    /// UserDefaults `oidcClientId` / `oidcRedirectPort` when needed.
-    func oidcLoginConfig(issuer: String) -> OIDCLoginConfig {
+    /// `http://127.0.0.1:53180/callback` — reuse that for Keycloak-style IdPs.
+    /// Microsoft Entra needs a real Application (client) ID GUID; never invent
+    /// `claude-desktop` for Entra. Override with UserDefaults `oidcClientId` /
+    /// `oidcRedirectPort` when needed.
+    func oidcLoginConfig(issuer: String) -> OIDCLoginConfig? {
         let defaults = UserDefaults.standard
-        let clientId =
-            defaults.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
-            ?? {
-                switch selectedAgentId {
-                case "claude-code", "claude-desktop": return "claude-desktop"
-                case "codex": return "codex"
-                default: return "kong-ai-switch"
-                }
-            }()
+        let isEntra =
+            issuer.localizedCaseInsensitiveContains("login.microsoftonline.com")
+            || issuer.localizedCaseInsensitiveContains("sts.windows.net")
+        let stored = defaults.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
+        let clientId: String?
+        if let stored {
+            clientId = stored
+        } else if isEntra {
+            clientId = nil
+        } else {
+            switch selectedAgentId {
+            case "claude-code", "claude-desktop": clientId = "claude-desktop"
+            case "codex": clientId = "codex"
+            default: clientId = "kong-ai-switch"
+            }
+        }
+        guard let clientId else { return nil }
         let port: UInt16 = {
             let stored = defaults.integer(forKey: "oidcRedirectPort")
             if stored > 0, stored < 65536 { return UInt16(stored) }
@@ -385,13 +406,19 @@ final class AppState: ObservableObject {
             return
         }
 
+        guard let config = oidcLoginConfig(issuer: issuer) else {
+            credentialError =
+                "Microsoft Entra needs your app's Application (client) ID. "
+                + "Run: defaults write com.kong.KongAISwitch oidcClientId '<guid>'"
+            return
+        }
+
         oidcLoginTask?.cancel()
         credentialUseKeyAuth = false
         credentialError = nil
         oidcSigningIn = true
         busy = "Waiting for browser sign-in"
 
-        let config = oidcLoginConfig(issuer: issuer)
         let login = OIDCInteractiveLogin()
 
         oidcLoginTask = Task { [weak self] in
@@ -409,11 +436,13 @@ final class AppState: ObservableObject {
                     self.credentialValue = tokens.accessToken
                     self.credentialUseKeyAuth = false
                     // Apply immediately — same as Switch with a pasted token.
+                    // Pass the PKCE client id so Claude Desktop gets the same one.
                     self.use(
                         model: model,
                         credential: tokens.accessToken,
                         remember: false,
-                        authKind: "openid-connect"
+                        authKind: "openid-connect",
+                        oidcClientId: config.clientId
                     )
                 }
             } catch is CancellationError {
@@ -760,6 +789,25 @@ final class AppState: ObservableObject {
     }
 
     func clearToast() { toast = nil }
+
+    /// Prefer `azp` / `appid` from a JWT payload (Entra public-client id).
+    static func clientIdFromJwt(_ token: String?) -> String? {
+        guard let token, !token.isEmpty else { return nil }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        var b64 = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - b64.count % 4) % 4
+        if pad > 0 { b64 += String(repeating: "=", count: pad) }
+        guard let data = Data(base64Encoded: b64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        for key in ["azp", "appid", "client_id"] {
+            if let value = json[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
 }
 
 /// Rewrite each configured agent's settings to the model's new base URL.

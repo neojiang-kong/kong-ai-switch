@@ -193,8 +193,12 @@ async function readClaudeDesktopMeta(libraryDir) {
  *
  * Desktop does not read ANTHROPIC_* from ~/.claude/settings.json. It expects
  * inferenceProvider / inferenceGateway* keys in configLibrary/<uuid>.json.
+ *
+ * Interactive OIDC and static API-key credentials must not be mixed — Claude
+ * Desktop's Configure Third-Party Inference page fails to load when both
+ * `inferenceCredentialKind: "interactive"` and `inferenceGatewayApiKey` are set.
  */
-export function buildClaudeDesktopProfile(profile, { token } = {}) {
+export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
   const baseUrl = String(profile.baseUrl ?? "").replace(/\/?$/, "/");
   const modelName = profile.clientModelId ?? profile.name;
   const next = {
@@ -214,23 +218,17 @@ export function buildClaudeDesktopProfile(profile, { token } = {}) {
   const issuer = preferred?.issuer ?? null;
 
   if (kind === "openid-connect" && issuer) {
-    // Interactive PKCE — same loopback defaults as Claude Desktop / our app.
+    // Interactive PKCE only — never also set inferenceGatewayApiKey.
     next.inferenceCredentialKind = "interactive";
     next.inferenceGatewayOidcAuthFlow = "browser";
     next.inferenceGatewayOidc = {
       issuer,
-      clientId: "claude-desktop",
-      scopes: "openid profile email",
+      clientId: resolveOidcClientId({ issuer, token, clientId }),
+      scopes: oidcScopesForIssuer(issuer),
       bearerTokenType: "access_token",
-      redirectPort: 53180,
+      redirectPort: Number(process.env.KONG_AI_OIDC_REDIRECT_PORT) || 53180,
       appendOfflineAccess: true,
     };
-    // If the user just signed in and passed a token, also stash it as a
-    // static fallback so the first request works before interactive refresh.
-    if (token) {
-      next.inferenceGatewayApiKey = token;
-      next.inferenceGatewayAuthScheme = "bearer";
-    }
     return next;
   }
 
@@ -257,14 +255,67 @@ export function buildClaudeDesktopProfile(profile, { token } = {}) {
   return next;
 }
 
-async function applyClaudeDesktop3p(agent, profile, { token, home }) {
+/** Entra / Keycloak need different default public-client ids and scopes. */
+function isEntraIssuer(issuer) {
+  return /login\.microsoftonline\.com|sts\.windows\.net/i.test(String(issuer ?? ""));
+}
+
+function oidcScopesForIssuer(issuer) {
+  // appendOfflineAccess adds offline_access; keep the base scopes simple.
+  // Entra often wants a resource scope — operators can override via env.
+  if (process.env.KONG_AI_OIDC_SCOPES) return process.env.KONG_AI_OIDC_SCOPES;
+  if (isEntraIssuer(issuer)) return "openid profile email offline_access";
+  return "openid profile email";
+}
+
+/**
+ * Public OIDC client id for Claude Desktop's loopback PKCE flow.
+ *
+ * Prefer an explicit override, then a claim from a just-issued token (`azp` /
+ * `appid`), then Keycloak-style `claude-desktop`. Never invent Entra GUIDs.
+ */
+function resolveOidcClientId({ issuer, token, clientId }) {
+  const explicit =
+    clientId ||
+    process.env.KONG_AI_OIDC_CLIENT_ID ||
+    process.env.CLAUDE_DESKTOP_OIDC_CLIENT_ID;
+  if (explicit) return String(explicit).trim();
+
+  const fromJwt = clientIdFromJwt(token);
+  if (fromJwt) return fromJwt;
+
+  if (isEntraIssuer(issuer)) {
+    // Hardcoding "claude-desktop" breaks Entra and can hang the 3P settings UI.
+    throw new Error(
+      "Claude Desktop OIDC against Microsoft Entra needs the Entra app (client) id. " +
+        "Set KONG_AI_OIDC_CLIENT_ID to your public native app's Application (client) ID, " +
+        "or pass --oidc-client-id.",
+    );
+  }
+  return "claude-desktop";
+}
+
+function clientIdFromJwt(token) {
+  if (!token || typeof token !== "string" || token.split(".").length < 2) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+    const id = payload.azp || payload.appid || payload.client_id;
+    // Prefer GUID-shaped Entra app ids; skip opaque Keycloak client names only
+    // when we already have a better source — here any non-empty azp is fine.
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function applyClaudeDesktop3p(agent, profile, { token, home, clientId }) {
   const libraryDir = agent.configPath(home);
   await mkdir(libraryDir, { recursive: true });
 
   const profileId = agent.profileId ?? CLAUDE_DESKTOP_PROFILE_ID;
   const profileName = agent.profileName ?? CLAUDE_DESKTOP_PROFILE_NAME;
   const profileFile = path.join(libraryDir, `${profileId}.json`);
-  const body = buildClaudeDesktopProfile(profile, { token });
+  const body = buildClaudeDesktopProfile(profile, { token, clientId });
   await writeAtomic(profileFile, JSON.stringify(body, null, 2) + "\n");
 
   const { meta, metaFile } = await readClaudeDesktopMeta(libraryDir);
@@ -609,7 +660,7 @@ function applyCopilotSettings(settings, profile) {
  * Point one agent at a model.
  * @returns {{agent: string, file: string, created: boolean, envFile?: string}}
  */
-export async function applyToAgent(agentId, profile, { token, home = homedir(), authKind } = {}) {
+export async function applyToAgent(agentId, profile, { token, home = homedir(), authKind, clientId } = {}) {
   const agent = getAgent(agentId);
   const effective = authKind ? { ...profile, auth: authWithKind(profile.auth, authKind) } : profile;
 
@@ -652,7 +703,7 @@ export async function applyToAgent(agentId, profile, { token, home = homedir(), 
   }
 
   if (agent.kind === "claude-desktop-3p") {
-    return applyClaudeDesktop3p(agent, effective, { token, home });
+    return applyClaudeDesktop3p(agent, effective, { token, home, clientId });
   }
 
   throw new Error(`Agent "${agentId}" has no writer.`);

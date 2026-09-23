@@ -157,11 +157,20 @@ struct CredentialView: View {
             .font(.system(size: 10))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            Text("Client \(config.clientId) → \(config.redirectURI)")
+            if let config {
+                Text("Client \(config.clientId) → \(config.redirectURI)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(
+                    "Entra: set Application (client) ID via defaults write com.kong.KongAISwitch oidcClientId '<guid>'"
+                )
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary)
-                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

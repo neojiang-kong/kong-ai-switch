@@ -70,6 +70,7 @@ Models:
   kong-ai-switch sync [--env <name>] [--gateway <id>]
   kong-ai-switch list [--env <name>] [--all] [--json]
   kong-ai-switch use <model> [--env <name>] [--agent <a,b>] [--token <t>] [--auth <kind>]
+                       [--oidc-client-id <id>]
   kong-ai-switch credential set <model> --token <key> [--env <name>]
   kong-ai-switch credential clear <model> [--env <name>]
   kong-ai-switch credential show <model> [--env <name>]
@@ -993,6 +994,8 @@ async function cmdUse(positional, flags) {
   const profileForAgent = authKind
     ? { ...profile, auth: effectiveAuth }
     : profile;
+  const oidcClientId =
+    typeof flags["oidc-client-id"] === "string" ? flags["oidc-client-id"] : undefined;
 
   const applied = [];
   for (const agentId of requestedAgents) {
@@ -1000,7 +1003,13 @@ async function cmdUse(positional, flags) {
     // Claude Desktop shares Claude Code's file; writing twice is wasted work.
     if (agent.sharesConfigWith && requestedAgents.includes(agent.sharesConfigWith)) continue;
     try {
-      applied.push(await applyToAgent(agentId, profileForAgent, { token, authKind }));
+      applied.push(
+        await applyToAgent(agentId, profileForAgent, {
+          token,
+          authKind,
+          clientId: oidcClientId,
+        }),
+      );
     } catch (cause) {
       throw new UserError(cause.message);
     }
