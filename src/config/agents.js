@@ -11,7 +11,7 @@
  * 404 is worse than not offering it, so each agent declares what it accepts.
  */
 
-import { readFile, writeFile, rename, mkdir, stat } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { authWithKind } from "../kong/auth.js";
@@ -56,8 +56,8 @@ export const AGENTS = {
     // See https://claude.com/docs/third-party/claude-desktop/configuration
     kind: "claude-desktop-3p",
     configPath: (home) => claudeDesktopLibraryDir(home),
-    /** Stable profile id we own inside configLibrary. */
-    profileId: "6b6f6e67-6169-4e67-8000-73776974636801",
+    /** Stable profile id we own inside configLibrary (must be a real UUID). */
+    profileId: "6b6f6e67-6169-4e67-8a19-737769746368",
     profileName: "Kong AI Switch",
     ownedKeys: [
       "inferenceProvider",
@@ -164,8 +164,10 @@ async function writeAtomic(file, body) {
 /**
  * Stable UUID for the profile kong-ai-switch maintains.
  * Must match AGENTS["claude-desktop"].profileId.
+ * Must be a RFC 4122 UUID — Claude Desktop rejects unknown/invalid ids with
+ * "Couldn't load configuration" / readConfig failed unknown config id.
  */
-const CLAUDE_DESKTOP_PROFILE_ID = "6b6f6e67-6169-4e67-8000-73776974636801";
+const CLAUDE_DESKTOP_PROFILE_ID = "6b6f6e67-6169-4e67-8a19-737769746368";
 const CLAUDE_DESKTOP_PROFILE_NAME = "Kong AI Switch";
 
 async function readClaudeDesktopMeta(libraryDir) {
@@ -314,13 +316,24 @@ async function applyClaudeDesktop3p(agent, profile, { token, home, clientId }) {
 
   const profileId = agent.profileId ?? CLAUDE_DESKTOP_PROFILE_ID;
   const profileName = agent.profileName ?? CLAUDE_DESKTOP_PROFILE_NAME;
+  if (!isUuid(profileId)) {
+    throw new Error(
+      `Claude Desktop profile id must be a UUID (got "${profileId}"). ` +
+        `Invalid ids make Configure Third-Party Inference show "Couldn't load configuration".`,
+    );
+  }
   const profileFile = path.join(libraryDir, `${profileId}.json`);
   const body = buildClaudeDesktopProfile(profile, { token, clientId });
   await writeAtomic(profileFile, JSON.stringify(body, null, 2) + "\n");
 
+  // Drop the pre-0.2.3 invalid id so Claude Desktop's library list stays loadable.
+  await removeLegacyInvalidProfile(libraryDir);
+
   const { meta, metaFile } = await readClaudeDesktopMeta(libraryDir);
   const entries = Array.isArray(meta.entries) ? [...meta.entries] : [];
-  const withoutUs = entries.filter((e) => e?.id !== profileId);
+  const withoutUs = entries.filter(
+    (e) => e?.id !== profileId && e?.id !== LEGACY_INVALID_PROFILE_ID,
+  );
   withoutUs.push({ id: profileId, name: profileName });
   const nextMeta = {
     appliedId: profileId,
@@ -329,6 +342,28 @@ async function applyClaudeDesktop3p(agent, profile, { token, home, clientId }) {
   await writeAtomic(metaFile, JSON.stringify(nextMeta, null, 2) + "\n");
 
   return { agent: agent.id, file: profileFile, created: true, libraryDir };
+}
+
+/** Pre-0.2.3 id was not a UUID (14-char final segment) and breaks Desktop's 3P UI. */
+const LEGACY_INVALID_PROFILE_ID = "6b6f6e67-6169-4e67-8000-73776974636801";
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    String(value ?? ""),
+  );
+}
+
+async function removeLegacyInvalidProfile(libraryDir) {
+  for (const name of [
+    `${LEGACY_INVALID_PROFILE_ID}.json`,
+    `${LEGACY_INVALID_PROFILE_ID}.json.invalid-uuid`,
+  ]) {
+    try {
+      await unlink(path.join(libraryDir, name));
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") throw cause;
+    }
+  }
 }
 
 async function statusClaudeDesktop3p(agent, { home }) {

@@ -536,6 +536,14 @@ test("agents declare a vendor for the UI", () => {
   assert.equal(getAgent("claude-desktop").sharesConfigWith, undefined);
 });
 
+test("Claude Desktop profile id is a real UUID", () => {
+  const id = getAgent("claude-desktop").profileId;
+  assert.match(
+    id,
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+  );
+});
+
 test("Claude Desktop writes configLibrary, not ~/.claude/settings.json", async () => {
   const home = await scratchHome();
   const keyAuthProfile = {

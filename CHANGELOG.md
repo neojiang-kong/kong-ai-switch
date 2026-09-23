@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.3
+
+### Fixes
+- **Claude Desktop "Couldn't load configuration"** — the owned configLibrary profile id was not a valid UUID (14-character final segment). Claude Desktop logs `readConfig failed unknown config id` and the 3P settings page fails. Replaced with a real UUID and removes the legacy invalid entry on switch.
+
 ## 0.2.2
 
 ### Fixes
