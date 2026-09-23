@@ -57,30 +57,54 @@ public enum CLIDiscovery {
     /// checked explicitly: Homebrew on Apple Silicon and Intel, the system
     /// path, and the common version managers.
     public static func nodeSearchPaths(home: String) -> [String] {
-        [
+        var paths = [
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
             "/usr/bin/node",
             "\(home)/.nvm/versions/node/current/bin/node",
             "\(home)/.volta/bin/node",
             "\(home)/.asdf/shims/node",
+            "\(home)/.fnm/current/bin/node",
             "\(home)/.local/bin/node",
         ]
+        // nvm rarely keeps a `current` symlink; pick the newest installed version.
+        let nvmRoot = "\(home)/.nvm/versions/node"
+        if let versions = try? FileManager.default.contentsOfDirectory(atPath: nvmRoot) {
+            for version in versions.sorted(by: >) {
+                paths.append("\(nvmRoot)/\(version)/bin/node")
+            }
+        }
+        return paths
     }
 
-    /// Where the CLI's entry script might live relative to an install root.
-    public static func scriptCandidates(appSupport: String, home: String) -> [String] {
-        [
-            // Preferred: copied next to the .app by build-app.sh (outside TCC).
+    /// Where the CLI's entry script might live.
+    ///
+    /// Downloadable builds ship the CLI inside the .app at
+    /// `Contents/Resources/cli/`. Application Support is still checked for
+    /// developers who rebuild with `build-app.sh`.
+    public static func scriptCandidates(
+        appSupport: String,
+        home: String,
+        bundleResourcePath: String? = Bundle.main.resourcePath
+    ) -> [String] {
+        var paths: [String] = []
+        if let bundleResourcePath {
+            paths.append("\(bundleResourcePath)/cli/src/cli/index.js")
+        }
+        paths += [
             "\(appSupport)/KongAISwitch/cli/src/cli/index.js",
-            // Common global npm installs.
             "/opt/homebrew/lib/node_modules/kong-ai-switch/src/cli/index.js",
             "/usr/local/lib/node_modules/kong-ai-switch/src/cli/index.js",
             "\(home)/.npm-global/lib/node_modules/kong-ai-switch/src/cli/index.js",
-            // Dev checkout checked out under the home directory.
             "\(home)/kong-ai-switch/src/cli/index.js",
             "\(home)/src/kong-ai-switch/src/cli/index.js",
         ]
+        return paths
+    }
+
+    public enum Failure: Error, Equatable, Sendable {
+        case missingNode
+        case missingScript
     }
 
     /// Find a usable node + CLI pair, or nil when either is missing.
@@ -91,24 +115,59 @@ public enum CLIDiscovery {
         appSupport: String = NSSearchPathForDirectoriesInDomains(
             .applicationSupportDirectory, .userDomainMask, true
         ).first ?? "",
+        bundleResourcePath: String? = Bundle.main.resourcePath,
         overrideScript: String? = nil
     ) -> CLILocation? {
-        guard let nodePath = nodeSearchPaths(home: home).first(where: fileExists) else { return nil }
+        switch diagnose(
+            fileExists: fileExists,
+            scriptExists: scriptExists,
+            home: home,
+            appSupport: appSupport,
+            bundleResourcePath: bundleResourcePath,
+            overrideScript: overrideScript
+        ) {
+        case .success(let location):
+            return location
+        case .failure:
+            return nil
+        }
+    }
+
+    /// Same search as `locate`, but reports whether Node or the CLI script is missing.
+    public static func diagnose(
+        fileExists: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) },
+        scriptExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        home: String = NSHomeDirectory(),
+        appSupport: String = NSSearchPathForDirectoriesInDomains(
+            .applicationSupportDirectory, .userDomainMask, true
+        ).first ?? "",
+        bundleResourcePath: String? = Bundle.main.resourcePath,
+        overrideScript: String? = nil
+    ) -> Result<CLILocation, Failure> {
+        guard let nodePath = nodeSearchPaths(home: home).first(where: fileExists) else {
+            return .failure(.missingNode)
+        }
 
         if let overrideScript, scriptExists(overrideScript) {
-            return CLILocation(
-                node: URL(fileURLWithPath: nodePath),
-                script: URL(fileURLWithPath: overrideScript)
-            )
+            return .success(
+                CLILocation(
+                    node: URL(fileURLWithPath: nodePath),
+                    script: URL(fileURLWithPath: overrideScript)
+                ))
         }
 
         guard
-            let script = scriptCandidates(appSupport: appSupport, home: home)
-                .first(where: scriptExists)
-        else { return nil }
+            let script = scriptCandidates(
+                appSupport: appSupport, home: home, bundleResourcePath: bundleResourcePath
+            )
+            .first(where: scriptExists)
+        else {
+            return .failure(.missingScript)
+        }
 
-        return CLILocation(
-            node: URL(fileURLWithPath: nodePath), script: URL(fileURLWithPath: script))
+        return .success(
+            CLILocation(
+                node: URL(fileURLWithPath: nodePath), script: URL(fileURLWithPath: script)))
     }
 }
 

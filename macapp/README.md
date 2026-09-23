@@ -52,7 +52,7 @@ To check the UI, open the app and confirm: the panel lists your environments wit
 
 The app drives the `kong-ai-switch` CLI, and macOS will not let an unsigned app read `~/Documents`, `~/Desktop` or `~/Downloads`. A checkout in any of those works from your terminal but fails from the `.app` with `EPERM`.
 
-`build-app.sh` handles this by copying the CLI to `~/Library/Application Support/KongAISwitch/cli`, which is not protected, and the app looks there first. Re-run it after changing the CLI so the installed copy stays current.
+`build-app.sh` bundles the CLI into `KongAISwitch.app/Contents/Resources/cli` (so zip downloads work without a manual install) and also mirrors it to `~/Library/Application Support/KongAISwitch/cli`. Re-run it after changing the CLI so both copies stay current.
 
 To see which copy the app would use:
 

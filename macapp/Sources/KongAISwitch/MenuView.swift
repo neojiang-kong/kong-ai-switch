@@ -623,10 +623,10 @@ struct MenuView: View {
 
     private var missingCLI: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("CLI not found", systemImage: "exclamationmark.triangle.fill")
+            Label(missingCLITitle, systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundStyle(.orange)
-            Text("This app drives the kong-ai-switch command line tool, which it could not locate. Install Node.js and the CLI, then reopen this app.")
+            Text(missingCLIBody)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -634,5 +634,24 @@ struct MenuView: View {
                 .controlSize(.small)
         }
         .padding(14)
+    }
+
+    private var missingCLITitle: String {
+        switch state.cliMissingReason {
+        case .missingNode: return "Node.js not found"
+        case .missingScript: return "CLI not found"
+        case .none: return "CLI not found"
+        }
+    }
+
+    private var missingCLIBody: String {
+        switch state.cliMissingReason {
+        case .missingNode:
+            return "Kong AI Switch needs Node.js 20+ to run the bundled CLI. Install it with Homebrew (brew install node), then reopen this app."
+        case .missingScript:
+            return "This app could not find its bundled kong-ai-switch CLI. Re-download KongAISwitch-macOS.zip from the repo, or rebuild with macapp/build-app.sh."
+        case .none:
+            return "This app drives the kong-ai-switch CLI. Install Node.js 20+, then reopen this app."
+        }
     }
 }

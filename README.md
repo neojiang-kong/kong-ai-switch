@@ -35,11 +35,14 @@ The API key never reaches the developer. Kong holds the upstream credential on t
 
 ## Download (macOS menu bar app)
 
-Pre-built app (Apple Silicon / ad-hoc signed):
+Pre-built app (**v0.2.0**, Apple Silicon / ad-hoc signed):
 
+- [GitHub Release v0.2.0](https://github.com/neojiang-kong/kong-ai-switch/releases/tag/v0.2.0) (recommended)
 - [`dist/KongAISwitch-macOS.zip`](dist/KongAISwitch-macOS.zip)
 
-Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized. The app needs **Node.js 20+**; it bundles a copy of the CLI under Application Support on first build/install from source.
+Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized.
+
+**Requirement:** [Node.js 20+](https://nodejs.org/) (`brew install node`). The CLI ships **inside the app** — no separate checkout or `npm install` needed.
 
 To rebuild the zip yourself:
 

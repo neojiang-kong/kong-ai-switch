@@ -19,6 +19,8 @@ final class AppState: ObservableObject {
     @Published var errorMessage: String?
     @Published var toast: String?
     @Published var cliMissing = false
+    /// Why discovery failed when `cliMissing` is true.
+    @Published var cliMissingReason: CLIDiscovery.Failure?
     @Published var showingSetup = false
     @Published var editingEnvironment: KongEnvironment?
 
@@ -78,12 +80,16 @@ final class AppState: ObservableObject {
     }
 
     private func locateCLI() {
-        guard let location = CLIDiscovery.locate() else {
+        switch CLIDiscovery.diagnose() {
+        case .success(let location):
+            cli = KongCLI(location: location)
+            cliMissing = false
+            cliMissingReason = nil
+        case .failure(let reason):
+            cli = nil
             cliMissing = true
-            return
+            cliMissingReason = reason
         }
-        cli = KongCLI(location: location)
-        cliMissing = false
     }
 
     var activeEnvironmentName: String? {

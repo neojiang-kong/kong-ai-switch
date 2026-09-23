@@ -90,9 +90,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <!-- Menu bar only: no Dock icon, no app menu. -->
@@ -104,23 +104,32 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Install the CLI where the app can actually read it.
+# Bundle the CLI inside the .app so zip downloads work without a manual
+# checkout. Users still need Node.js on the machine; the script is pure JS
+# with no npm dependencies.
 #
-# macOS protects ~/Documents, ~/Desktop and ~/Downloads from unsigned apps
-# (TCC). A checkout in any of those is readable from your terminal but not
-# from the .app, which fails with EPERM. Application Support is not
-# protected, so the CLI is copied there and the app finds it first.
+# Also mirror into Application Support for older builds / TCC-safe overrides
+# (a Documents checkout is not readable from an unsigned .app).
 CLI_SRC="$(cd "$ROOT/.." && pwd)"
-CLI_DEST="$HOME/Library/Application Support/KongAISwitch/cli"
+CLI_IN_APP="$APP/Contents/Resources/cli"
+CLI_APP_SUPPORT="$HOME/Library/Application Support/KongAISwitch/cli"
+
+install_cli() {
+  local dest="$1"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp -R "$CLI_SRC/src" "$dest/src"
+  [ -f "$CLI_SRC/package.json" ] && cp "$CLI_SRC/package.json" "$dest/package.json"
+}
 
 if [ -f "$CLI_SRC/src/cli/index.js" ]; then
+  echo "Bundling CLI into app Resources ..."
+  install_cli "$CLI_IN_APP"
+  echo "  $CLI_IN_APP"
+
   echo "Installing CLI to Application Support ..."
-  rm -rf "$CLI_DEST"
-  mkdir -p "$CLI_DEST"
-  # Only what the CLI needs at runtime: no .git, no build output.
-  cp -R "$CLI_SRC/src" "$CLI_DEST/src"
-  [ -f "$CLI_SRC/package.json" ] && cp "$CLI_SRC/package.json" "$CLI_DEST/package.json"
-  echo "  $CLI_DEST"
+  install_cli "$CLI_APP_SUPPORT"
+  echo "  $CLI_APP_SUPPORT"
 else
   echo "warning: CLI source not found at $CLI_SRC/src/cli/index.js" >&2
 fi
