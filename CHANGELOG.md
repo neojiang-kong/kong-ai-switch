@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+### Fixes
+- **Claude Desktop** now writes `~/Library/Application Support/Claude-3p/configLibrary/` (third-party inference), not `~/.claude/settings.json`. Claude Code and Claude Desktop no longer share a file — select **Claude Desktop** in the app and switch again, then fully quit/reopen Claude Desktop.
+
 ## 0.2.0
 
 ### macOS app

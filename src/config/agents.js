@@ -16,6 +16,17 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { authWithKind } from "../kong/auth.js";
 
+/** Local Claude Desktop 3P configLibrary root for this OS. */
+export function claudeDesktopLibraryDir(home = homedir()) {
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "Claude-3p", "configLibrary");
+  }
+  if (process.platform === "win32") {
+    return path.join(home, "AppData", "Local", "Claude-3p", "configLibrary");
+  }
+  return path.join(home, ".config", "Claude-3p", "configLibrary");
+}
+
 /** Agents this tool can configure. */
 export const AGENTS = {
   "claude-code": {
@@ -41,18 +52,24 @@ export const AGENTS = {
     name: "Claude Desktop",
     vendor: "anthropic",
     formats: ["anthropic"],
-    kind: "json-env",
-    // Claude Desktop reads the same settings file as Claude Code for env.
-    configPath: (home) => path.join(home, ".claude", "settings.json"),
+    // Claude Desktop on 3P reads configLibrary, NOT ~/.claude/settings.json.
+    // See https://claude.com/docs/third-party/claude-desktop/configuration
+    kind: "claude-desktop-3p",
+    configPath: (home) => claudeDesktopLibraryDir(home),
+    /** Stable profile id we own inside configLibrary. */
+    profileId: "6b6f6e67-6169-4e67-8000-73776974636801",
+    profileName: "Kong AI Switch",
     ownedKeys: [
-      "ANTHROPIC_BASE_URL",
-      "ANTHROPIC_AUTH_TOKEN",
-      "ANTHROPIC_CUSTOM_HEADERS",
-      "ANTHROPIC_MODEL",
-      "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+      "inferenceProvider",
+      "inferenceGatewayBaseUrl",
+      "inferenceGatewayApiKey",
+      "inferenceGatewayAuthScheme",
+      "inferenceCredentialKind",
+      "inferenceGatewayOidc",
+      "inferenceGatewayOidcAuthFlow",
+      "inferenceCustomHeaders",
+      "inferenceModels",
     ],
-    /** Shares a file with Claude Code, so switching one switches both. */
-    sharesConfigWith: "claude-code",
   },
 
   codex: {
@@ -141,8 +158,163 @@ async function writeAtomic(file, body) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON env agents (Claude Code, Claude Desktop)
+// Claude Desktop (3P configLibrary)
 // ---------------------------------------------------------------------------
+
+/**
+ * Stable UUID for the profile kong-ai-switch maintains.
+ * Must match AGENTS["claude-desktop"].profileId.
+ */
+const CLAUDE_DESKTOP_PROFILE_ID = "6b6f6e67-6169-4e67-8000-73776974636801";
+const CLAUDE_DESKTOP_PROFILE_NAME = "Kong AI Switch";
+
+async function readClaudeDesktopMeta(libraryDir) {
+  const metaFile = path.join(libraryDir, "_meta.json");
+  try {
+    const raw = await readFile(metaFile, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return { meta: parsed, metaFile, existed: true };
+    }
+  } catch (cause) {
+    if (cause?.code !== "ENOENT" && !(cause instanceof SyntaxError)) {
+      throw new Error(`Could not read ${metaFile}: ${cause.message}`);
+    }
+  }
+  return {
+    meta: { appliedId: null, entries: [] },
+    metaFile,
+    existed: false,
+  };
+}
+
+/**
+ * Build the Claude Desktop 3P gateway profile for a Kong AI Model.
+ *
+ * Desktop does not read ANTHROPIC_* from ~/.claude/settings.json. It expects
+ * inferenceProvider / inferenceGateway* keys in configLibrary/<uuid>.json.
+ */
+export function buildClaudeDesktopProfile(profile, { token } = {}) {
+  const baseUrl = String(profile.baseUrl ?? "").replace(/\/?$/, "/");
+  const modelName = profile.clientModelId ?? profile.name;
+  const next = {
+    inferenceProvider: "gateway",
+    inferenceGatewayBaseUrl: baseUrl,
+    inferenceModels: [
+      {
+        name: modelName,
+        labelOverride: profile.displayName ?? modelName,
+      },
+    ],
+  };
+
+  const preferred = profile.auth?.preferred;
+  const kind = preferred?.kind;
+  const header = preferred?.header ?? "Authorization";
+  const issuer = preferred?.issuer ?? null;
+
+  if (kind === "openid-connect" && issuer) {
+    // Interactive PKCE — same loopback defaults as Claude Desktop / our app.
+    next.inferenceCredentialKind = "interactive";
+    next.inferenceGatewayOidcAuthFlow = "browser";
+    next.inferenceGatewayOidc = {
+      issuer,
+      clientId: "claude-desktop",
+      scopes: "openid profile email",
+      bearerTokenType: "access_token",
+      redirectPort: 53180,
+      appendOfflineAccess: true,
+    };
+    // If the user just signed in and passed a token, also stash it as a
+    // static fallback so the first request works before interactive refresh.
+    if (token) {
+      next.inferenceGatewayApiKey = token;
+      next.inferenceGatewayAuthScheme = "bearer";
+    }
+    return next;
+  }
+
+  next.inferenceCredentialKind = "static";
+  if (token) {
+    const lower = header.toLowerCase();
+    if (lower === "authorization") {
+      next.inferenceGatewayApiKey = token;
+      next.inferenceGatewayAuthScheme = "bearer";
+    } else if (lower === "x-api-key") {
+      next.inferenceGatewayApiKey = token;
+      next.inferenceGatewayAuthScheme = "x-api-key";
+    } else {
+      // Kong key-auth default is `apikey`, which is neither scheme.
+      next.inferenceGatewayApiKey = "kong-ai-gateway";
+      next.inferenceGatewayAuthScheme = "bearer";
+      next.inferenceCustomHeaders = { [header]: token };
+    }
+  } else if (!profile.requiresAuth) {
+    next.inferenceGatewayApiKey = "kong-ai-gateway";
+    next.inferenceGatewayAuthScheme = "bearer";
+  }
+
+  return next;
+}
+
+async function applyClaudeDesktop3p(agent, profile, { token, home }) {
+  const libraryDir = agent.configPath(home);
+  await mkdir(libraryDir, { recursive: true });
+
+  const profileId = agent.profileId ?? CLAUDE_DESKTOP_PROFILE_ID;
+  const profileName = agent.profileName ?? CLAUDE_DESKTOP_PROFILE_NAME;
+  const profileFile = path.join(libraryDir, `${profileId}.json`);
+  const body = buildClaudeDesktopProfile(profile, { token });
+  await writeAtomic(profileFile, JSON.stringify(body, null, 2) + "\n");
+
+  const { meta, metaFile } = await readClaudeDesktopMeta(libraryDir);
+  const entries = Array.isArray(meta.entries) ? [...meta.entries] : [];
+  const withoutUs = entries.filter((e) => e?.id !== profileId);
+  withoutUs.push({ id: profileId, name: profileName });
+  const nextMeta = {
+    appliedId: profileId,
+    entries: withoutUs,
+  };
+  await writeAtomic(metaFile, JSON.stringify(nextMeta, null, 2) + "\n");
+
+  return { agent: agent.id, file: profileFile, created: true, libraryDir };
+}
+
+async function statusClaudeDesktop3p(agent, { home }) {
+  const libraryDir = agent.configPath(home);
+  const profileId = agent.profileId ?? CLAUDE_DESKTOP_PROFILE_ID;
+  const profileFile = path.join(libraryDir, `${profileId}.json`);
+  const { meta } = await readClaudeDesktopMeta(libraryDir);
+  const applied = meta.appliedId === profileId;
+
+  let body = null;
+  try {
+    body = JSON.parse(await readFile(profileFile, "utf8"));
+  } catch {
+    return { agent: agent.id, file: profileFile, configured: false };
+  }
+
+  const model =
+    Array.isArray(body.inferenceModels) && body.inferenceModels[0]
+      ? body.inferenceModels[0].name
+      : null;
+  const baseUrl = body.inferenceGatewayBaseUrl ?? null;
+  const hasToken = Boolean(
+    body.inferenceGatewayApiKey ||
+      body.inferenceCredentialKind === "interactive" ||
+      (body.inferenceCustomHeaders && Object.keys(body.inferenceCustomHeaders).length),
+  );
+
+  return {
+    agent: agent.id,
+    file: profileFile,
+    configured: Boolean(applied && (baseUrl || model)),
+    baseUrl,
+    model,
+    hasToken,
+  };
+}
+
 
 async function readJsonSettings(file) {
   let raw;
@@ -479,6 +651,10 @@ export async function applyToAgent(agentId, profile, { token, home = homedir(), 
     return { agent: agent.id, file, envFile, created: !existed };
   }
 
+  if (agent.kind === "claude-desktop-3p") {
+    return applyClaudeDesktop3p(agent, effective, { token, home });
+  }
+
   throw new Error(`Agent "${agentId}" has no writer.`);
 }
 
@@ -550,6 +726,10 @@ export async function agentStatus(agentId, { home = homedir() } = {}) {
       hasToken,
       envFile: agent.envPath(home),
     };
+  }
+
+  if (agent.kind === "claude-desktop-3p") {
+    return statusClaudeDesktop3p(agent, { home });
   }
 
   return { agent: agent.id, file, configured: false };

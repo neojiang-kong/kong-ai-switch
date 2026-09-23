@@ -35,9 +35,9 @@ The API key never reaches the developer. Kong holds the upstream credential on t
 
 ## Download (macOS menu bar app)
 
-Pre-built app (**v0.2.0**, Apple Silicon / ad-hoc signed):
+Pre-built app (**v0.2.1**, Apple Silicon / ad-hoc signed):
 
-- [GitHub Release v0.2.0](https://github.com/neojiang-kong/kong-ai-switch/releases/tag/v0.2.0) (recommended)
+- [GitHub Release v0.2.1](https://github.com/neojiang-kong/kong-ai-switch/releases/tag/v0.2.1) (recommended)
 - [`dist/KongAISwitch-macOS.zip`](dist/KongAISwitch-macOS.zip)
 
 Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized.

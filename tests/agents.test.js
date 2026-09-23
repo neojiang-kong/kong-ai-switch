@@ -531,6 +531,81 @@ test("agents declare a vendor for the UI", () => {
   assert.equal(getAgent("claude-code").vendor, "anthropic");
   assert.equal(getAgent("codex").vendor, "openai");
   assert.equal(getAgent("github-copilot").vendor, "github");
+  assert.equal(getAgent("claude-desktop").vendor, "anthropic");
+  assert.equal(getAgent("claude-desktop").kind, "claude-desktop-3p");
+  assert.equal(getAgent("claude-desktop").sharesConfigWith, undefined);
+});
+
+test("Claude Desktop writes configLibrary, not ~/.claude/settings.json", async () => {
+  const home = await scratchHome();
+  const keyAuthProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: { kind: "key-auth", header: "apikey" },
+    },
+  };
+
+  const result = await applyToAgent("claude-desktop", keyAuthProfile, {
+    home,
+    token: "my-apikey",
+  });
+
+  assert.match(result.file, /Claude-3p[/\\]configLibrary[/\\]/);
+  assert.doesNotMatch(result.file, /\.claude[/\\]settings\.json$/);
+
+  const body = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(body.inferenceProvider, "gateway");
+  assert.equal(body.inferenceGatewayBaseUrl, "http://localhost:8000/");
+  assert.equal(body.inferenceCredentialKind, "static");
+  assert.equal(body.inferenceModels[0].name, "my-claude");
+  assert.equal(body.inferenceCustomHeaders.apikey, "my-apikey");
+
+  const meta = JSON.parse(
+    await readFile(path.join(path.dirname(result.file), "_meta.json"), "utf8"),
+  );
+  assert.equal(meta.appliedId, getAgent("claude-desktop").profileId);
+  assert.ok(meta.entries.some((e) => e.id === meta.appliedId));
+
+  // Claude Code file must stay untouched.
+  await assert.rejects(
+    () => readFile(path.join(home, ".claude", "settings.json"), "utf8"),
+    /ENOENT/,
+  );
+
+  const status = await agentStatus("claude-desktop", { home });
+  assert.equal(status.configured, true);
+  assert.equal(status.model, "my-claude");
+  assert.equal(status.baseUrl, "http://localhost:8000/");
+});
+
+test("Claude Desktop OIDC uses interactive browser login with issuer", async () => {
+  const home = await scratchHome();
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        header: "Authorization",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+
+  const result = await applyToAgent("claude-desktop", oidcProfile, {
+    home,
+    token: "eyJ-access",
+  });
+  const body = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(body.inferenceCredentialKind, "interactive");
+  assert.equal(body.inferenceGatewayOidcAuthFlow, "browser");
+  assert.equal(body.inferenceGatewayOidc.issuer, "https://idp.example.com/realms/demo");
+  assert.equal(body.inferenceGatewayOidc.clientId, "claude-desktop");
+  assert.equal(body.inferenceGatewayOidc.redirectPort, 53180);
+  assert.equal(body.inferenceGatewayApiKey, "eyJ-access");
 });
 
 test("malformed JSON is refused rather than overwritten", async () => {
