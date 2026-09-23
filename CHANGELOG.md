@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+### Fixes
+- **Claude Desktop OIDC** with a signed-in token now writes a **static** gateway profile (`inferenceGatewayApiKey` + `modelDiscoveryEnabled: false`, no trailing slash) — the same shape as a working Desktop-exported config. Interactive OIDC is only written when no token is supplied. Mixing interactive + API key is still avoided.
+
 ## 0.2.3
 
 ### Fixes

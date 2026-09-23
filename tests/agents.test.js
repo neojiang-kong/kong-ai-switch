@@ -565,9 +565,10 @@ test("Claude Desktop writes configLibrary, not ~/.claude/settings.json", async (
 
   const body = JSON.parse(await readFile(result.file, "utf8"));
   assert.equal(body.inferenceProvider, "gateway");
-  assert.equal(body.inferenceGatewayBaseUrl, "http://localhost:8000/");
+  assert.equal(body.inferenceGatewayBaseUrl, "http://localhost:8000");
   assert.equal(body.inferenceCredentialKind, "static");
   assert.equal(body.inferenceModels[0].name, "my-claude");
+  assert.equal(body.modelDiscoveryEnabled, false);
   assert.equal(body.inferenceCustomHeaders.apikey, "my-apikey");
 
   const meta = JSON.parse(
@@ -585,10 +586,10 @@ test("Claude Desktop writes configLibrary, not ~/.claude/settings.json", async (
   const status = await agentStatus("claude-desktop", { home });
   assert.equal(status.configured, true);
   assert.equal(status.model, "my-claude");
-  assert.equal(status.baseUrl, "http://localhost:8000/");
+  assert.equal(status.baseUrl, "http://localhost:8000");
 });
 
-test("Claude Desktop OIDC uses interactive browser login with issuer", async () => {
+test("Claude Desktop OIDC with a token writes static JWT like Desktop export", async () => {
   const home = await scratchHome();
   const oidcProfile = {
     ...anthropicProfile,
@@ -608,19 +609,42 @@ test("Claude Desktop OIDC uses interactive browser login with issuer", async () 
     token: "eyJ-access",
   });
   const body = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(body.inferenceCredentialKind, "static");
+  assert.equal(body.inferenceGatewayApiKey, "eyJ-access");
+  assert.equal(body.inferenceGatewayOidc, undefined);
+  assert.equal(body.inferenceGatewayOidcAuthFlow, undefined);
+  assert.equal(body.inferenceGatewayAuthScheme, undefined);
+  assert.equal(body.modelDiscoveryEnabled, false);
+  // No trailing slash — matches Desktop-exported working profiles.
+  assert.equal(body.inferenceGatewayBaseUrl, "http://localhost:8000");
+});
+
+test("Claude Desktop OIDC without a token keeps interactive PKCE only", async () => {
+  const home = await scratchHome();
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        header: "Authorization",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+
+  const result = await applyToAgent("claude-desktop", oidcProfile, { home });
+  const body = JSON.parse(await readFile(result.file, "utf8"));
   assert.equal(body.inferenceCredentialKind, "interactive");
   assert.equal(body.inferenceGatewayOidcAuthFlow, "browser");
   assert.equal(body.inferenceGatewayOidc.issuer, "https://idp.example.com/realms/demo");
   assert.equal(body.inferenceGatewayOidc.clientId, "claude-desktop");
-  assert.equal(body.inferenceGatewayOidc.redirectPort, 53180);
-  // Interactive must not also set a static API key — that breaks Desktop's 3P UI.
   assert.equal(body.inferenceGatewayApiKey, undefined);
-  assert.equal(body.inferenceGatewayAuthScheme, undefined);
 });
 
-test("Claude Desktop Entra OIDC takes client id from JWT azp, never claude-desktop", async () => {
+test("Claude Desktop Entra OIDC with token is static (no interactive mix)", async () => {
   const home = await scratchHome();
-  // Minimal unsigned JWT payload for the test: {"azp":"20167183-7ef7-48f2-9763-1d30199e32a9"}
   const payload = Buffer.from(
     JSON.stringify({ azp: "20167183-7ef7-48f2-9763-1d30199e32a9" }),
   ).toString("base64url");
@@ -640,11 +664,12 @@ test("Claude Desktop Entra OIDC takes client id from JWT azp, never claude-deskt
 
   const result = await applyToAgent("claude-desktop", oidcProfile, { home, token });
   const body = JSON.parse(await readFile(result.file, "utf8"));
-  assert.equal(body.inferenceGatewayOidc.clientId, "20167183-7ef7-48f2-9763-1d30199e32a9");
-  assert.equal(body.inferenceGatewayApiKey, undefined);
+  assert.equal(body.inferenceCredentialKind, "static");
+  assert.equal(body.inferenceGatewayApiKey, token);
+  assert.equal(body.inferenceGatewayOidc, undefined);
 });
 
-test("Claude Desktop Entra OIDC without client id fails clearly", async () => {
+test("Claude Desktop Entra OIDC without token needs client id for interactive", async () => {
   const home = await scratchHome();
   const oidcProfile = {
     ...anthropicProfile,

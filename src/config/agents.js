@@ -196,22 +196,26 @@ async function readClaudeDesktopMeta(libraryDir) {
  * Desktop does not read ANTHROPIC_* from ~/.claude/settings.json. It expects
  * inferenceProvider / inferenceGateway* keys in configLibrary/<uuid>.json.
  *
- * Interactive OIDC and static API-key credentials must not be mixed — Claude
- * Desktop's Configure Third-Party Inference page fails to load when both
- * `inferenceCredentialKind: "interactive"` and `inferenceGatewayApiKey` are set.
+ * Credential rules (do not mix modes — that breaks Configure Third-Party Inference):
+ * - OIDC **with** a token → `static` + `inferenceGatewayApiKey` (same shape as a
+ *   Desktop-exported working profile; token is the gateway Bearer).
+ * - OIDC **without** a token → `interactive` + `inferenceGatewayOidc` only, so
+ *   Desktop can run its own browser PKCE login.
+ * - key-auth / no-auth → `static` as before.
  */
 export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
-  const baseUrl = String(profile.baseUrl ?? "").replace(/\/?$/, "/");
+  // Match Desktop-exported profiles: no trailing slash on the gateway base URL.
+  const baseUrl = String(profile.baseUrl ?? "").replace(/\/+$/, "");
   const modelName = profile.clientModelId ?? profile.name;
+  const model = { name: modelName };
+  const label = profile.displayName ?? modelName;
+  if (label && label !== modelName) model.labelOverride = label;
+
   const next = {
-    inferenceProvider: "gateway",
     inferenceGatewayBaseUrl: baseUrl,
-    inferenceModels: [
-      {
-        name: modelName,
-        labelOverride: profile.displayName ?? modelName,
-      },
-    ],
+    modelDiscoveryEnabled: false,
+    inferenceModels: [model],
+    inferenceProvider: "gateway",
   };
 
   const preferred = profile.auth?.preferred;
@@ -220,7 +224,13 @@ export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
   const issuer = preferred?.issuer ?? null;
 
   if (kind === "openid-connect" && issuer) {
-    // Interactive PKCE only — never also set inferenceGatewayApiKey.
+    if (token) {
+      // Working Entra/gateway setups use a static Bearer JWT — not interactive+key.
+      next.inferenceCredentialKind = "static";
+      next.inferenceGatewayApiKey = token;
+      return next;
+    }
+    // No token yet: let Claude Desktop own the PKCE loopback login.
     next.inferenceCredentialKind = "interactive";
     next.inferenceGatewayOidcAuthFlow = "browser";
     next.inferenceGatewayOidc = {
@@ -239,19 +249,16 @@ export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
     const lower = header.toLowerCase();
     if (lower === "authorization") {
       next.inferenceGatewayApiKey = token;
-      next.inferenceGatewayAuthScheme = "bearer";
     } else if (lower === "x-api-key") {
       next.inferenceGatewayApiKey = token;
       next.inferenceGatewayAuthScheme = "x-api-key";
     } else {
       // Kong key-auth default is `apikey`, which is neither scheme.
       next.inferenceGatewayApiKey = "kong-ai-gateway";
-      next.inferenceGatewayAuthScheme = "bearer";
       next.inferenceCustomHeaders = { [header]: token };
     }
   } else if (!profile.requiresAuth) {
     next.inferenceGatewayApiKey = "kong-ai-gateway";
-    next.inferenceGatewayAuthScheme = "bearer";
   }
 
   return next;
