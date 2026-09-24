@@ -22,7 +22,15 @@ final class AppState: ObservableObject {
     /// Why discovery failed when `cliMissing` is true.
     @Published var cliMissingReason: CLIDiscovery.Failure?
     @Published var showingSetup = false
+    @Published var showingDesktopSettings = false
     @Published var editingEnvironment: KongEnvironment?
+
+    /// Claude Desktop configLibrary writer options (UserDefaults).
+    @Published var desktopPrefs = DesktopWriterPrefs.load()
+
+    /// Per-switch override of Desktop credential mode (CredentialView picker).
+    /// Cleared when the credential sheet closes; falls back to `desktopPrefs`.
+    @Published var credentialDesktopMode: DesktopCredentialMode?
 
     // Setup form fields.
     //
@@ -256,15 +264,50 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Effective Desktop credential mode for the current switch.
+    var effectiveDesktopCredentialMode: DesktopCredentialMode {
+        credentialDesktopMode ?? desktopPrefs.credentialMode
+    }
+
+    /// Persist Desktop writer prefs after the settings form edits them.
+    func saveDesktopPrefs() {
+        desktopPrefs.save()
+    }
+
+    func beginDesktopSettings() {
+        desktopPrefs = DesktopWriterPrefs.load()
+        showingDesktopSettings = true
+    }
+
+    func cancelDesktopSettings() {
+        showingDesktopSettings = false
+        // Reload so Cancel discards unsaved edits.
+        desktopPrefs = DesktopWriterPrefs.load()
+    }
+
+    func submitDesktopSettings() {
+        desktopPrefs.save()
+        showingDesktopSettings = false
+    }
+
     /// Whether this model still needs the user to type a credential in the UI.
     ///
     /// The whole point of the menu bar app is that the user never opens a
     /// terminal to paste a key. Open the form immediately when nothing is
     /// stored; only call the CLI once we have a value to hand it.
+    ///
+    /// Claude Desktop interactive OIDC needs no pasted token — Desktop runs
+    /// its own PKCE loop — so skip the prompt when that mode is selected.
     func needsCredentialPrompt(_ model: ModelProfile) -> Bool {
         guard model.requiresAuth || model.auth?.required == true else { return false }
         // A saved key-auth credential is enough to switch without asking.
         if model.hasCredential == true { return false }
+        if selectedAgentId == "claude-desktop",
+            effectiveDesktopCredentialMode == .interactive,
+            model.auth?.oidc != nil || model.auth?.preferred?.isOIDC == true
+        {
+            return false
+        }
         return true
     }
 
@@ -275,7 +318,8 @@ final class AppState: ObservableObject {
         credential: String? = nil,
         remember: Bool = false,
         authKind: String? = nil,
-        oidcClientId: String? = nil
+        oidcClientId: String? = nil,
+        desktopCredentialMode: DesktopCredentialMode? = nil
     ) {
         // Ask in the UI first. Round-tripping to the CLI just to learn a key
         // is missing would put a red error on screen before the prompt.
@@ -288,11 +332,25 @@ final class AppState: ObservableObject {
         let agentId = selectedAgentId
         let agentName = selectedAgentName
         let kind = authKind ?? (credential == nil ? nil : selectedAuthKind)
-        // Prefer an explicit id (browser login), then UserDefaults, then azp from a pasted JWT.
+        let prefs = desktopPrefs
+        let desktopMode =
+            desktopCredentialMode
+            ?? credentialDesktopMode
+            ?? (agentId == "claude-desktop" ? prefs.credentialMode : nil)
+        let issuer = model.auth?.oidc?.issuer ?? ""
+        // Prefer an explicit id (browser login), then issuer-aware prefs, then azp.
         let clientId =
             oidcClientId
-            ?? UserDefaults.standard.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
+            ?? prefs.resolvedOidcClientId(forIssuer: issuer)
             ?? Self.clientIdFromJwt(credential)
+
+        // Interactive Desktop must not send a token — that would mix modes.
+        let tokenForCLI: String? = {
+            if agentId == "claude-desktop", desktopMode == .interactive {
+                return nil
+            }
+            return credential
+        }()
 
         guard let cli else {
             cliMissing = true
@@ -301,12 +359,28 @@ final class AppState: ObservableObject {
         busy = "Switching"
         errorMessage = nil
 
+        let desktopOptions: DesktopWriterOptions? = agentId == "claude-desktop"
+            ? DesktopWriterOptions(
+                credentialMode: desktopMode?.rawValue,
+                modelDiscovery: prefs.modelDiscovery,
+                trailingSlash: prefs.trailingSlash,
+                labelOverride: prefs.labelOverride,
+                oidcClientId: clientId,
+                oidcScopes: prefs.oidcScopes.isEmpty ? nil : prefs.oidcScopes,
+                oidcRedirectPort: prefs.oidcRedirectPort,
+                oidcBearerTokenType: prefs.oidcBearerTokenType.rawValue,
+                oidcAppendOfflineAccess: prefs.oidcAppendOfflineAccess,
+                oidcAuthFlow: prefs.oidcAuthFlow.rawValue
+            )
+            : nil
+
         Task.detached(priority: .userInitiated) {
             do {
                 let result = try cli.use(
                     model: model.name, environment: name, agents: [agentId],
-                    credential: credential, save: remember, authKind: kind,
-                    oidcClientId: clientId
+                    credential: tokenForCLI, save: remember, authKind: kind,
+                    oidcClientId: clientId,
+                    desktop: desktopOptions
                 )
                 await MainActor.run {
                     self.busy = nil
@@ -314,6 +388,7 @@ final class AppState: ObservableObject {
                     self.credentialValue = ""
                     self.credentialError = nil
                     self.credentialSaveOnly = false
+                    self.credentialDesktopMode = nil
                     self.toast = self.switchToast(
                         displayName: result.displayName, agentId: agentId, agentName: agentName)
                     self.refresh()
@@ -344,6 +419,9 @@ final class AppState: ObservableObject {
         credentialValue = ""
         credentialError = nil
         credentialSaveOnly = saveOnly
+        credentialDesktopMode = selectedAgentId == "claude-desktop"
+            ? desktopPrefs.credentialMode
+            : nil
         // Default to the strategy this tool can actually hold for the user.
         if let auth = model.auth {
             if auth.keyAuth != nil {
@@ -363,6 +441,7 @@ final class AppState: ObservableObject {
         credentialValue = ""
         credentialError = nil
         credentialSaveOnly = false
+        credentialDesktopMode = nil
     }
 
     /// Public-client id for interactive OIDC (not the Kong gateway client).
@@ -370,16 +449,13 @@ final class AppState: ObservableObject {
     /// Claude Desktop registers `claude-desktop` with
     /// `http://127.0.0.1:53180/callback` — reuse that for Keycloak-style IdPs.
     /// Microsoft Entra needs a real Application (client) ID GUID; never invent
-    /// `claude-desktop` for Entra. Override with UserDefaults `oidcClientId` /
-    /// `oidcRedirectPort` when needed.
+    /// `claude-desktop` for Entra. Entra ids live under Desktop… → Entra
+    /// client ID and are never applied to non-Entra issuers.
     func oidcLoginConfig(issuer: String) -> OIDCLoginConfig? {
-        let defaults = UserDefaults.standard
-        let isEntra =
-            issuer.localizedCaseInsensitiveContains("login.microsoftonline.com")
-            || issuer.localizedCaseInsensitiveContains("sts.windows.net")
-        let stored = defaults.string(forKey: "oidcClientId").flatMap { $0.isEmpty ? nil : $0 }
+        let prefs = desktopPrefs
+        let isEntra = DesktopWriterPrefs.isEntraIssuer(issuer)
         let clientId: String?
-        if let stored {
+        if let stored = prefs.resolvedOidcClientId(forIssuer: issuer) {
             clientId = stored
         } else if isEntra {
             clientId = nil
@@ -391,12 +467,10 @@ final class AppState: ObservableObject {
             }
         }
         guard let clientId else { return nil }
-        let port: UInt16 = {
-            let stored = defaults.integer(forKey: "oidcRedirectPort")
-            if stored > 0, stored < 65536 { return UInt16(stored) }
-            return 53180
-        }()
-        return OIDCLoginConfig(issuer: issuer, clientId: clientId, redirectPort: port)
+        let port = prefs.oidcRedirectPort
+        let redirectPort: UInt16 =
+            (port > 0 && port < 65536) ? UInt16(port) : 53180
+        return OIDCLoginConfig(issuer: issuer, clientId: clientId, redirectPort: redirectPort)
     }
 
     /// Browser PKCE sign-in, then switch the model with the access token.
@@ -409,7 +483,7 @@ final class AppState: ObservableObject {
         guard let config = oidcLoginConfig(issuer: issuer) else {
             credentialError =
                 "Microsoft Entra needs your app's Application (client) ID. "
-                + "Run: defaults write com.kong.KongAISwitch oidcClientId '<guid>'"
+                + "Open Desktop… and set Entra Client ID to your Application (client) ID."
             return
         }
 
@@ -463,6 +537,23 @@ final class AppState: ObservableObject {
     }
 
     func submitCredential(for model: ModelProfile) {
+        // Desktop interactive OIDC: no token — Desktop owns PKCE.
+        let desktopInteractive =
+            selectedAgentId == "claude-desktop"
+            && !credentialUseKeyAuth
+            && effectiveDesktopCredentialMode == .interactive
+
+        if desktopInteractive {
+            use(
+                model: model,
+                credential: nil,
+                remember: false,
+                authKind: "openid-connect",
+                desktopCredentialMode: .interactive
+            )
+            return
+        }
+
         let value = credentialValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else {
             credentialError = "Enter the credential first."
@@ -474,14 +565,18 @@ final class AppState: ObservableObject {
             if credentialUseKeyAuth {
                 saveCredentialOnly(for: model, value: value)
             } else {
-                use(model: model, credential: value, remember: false, authKind: selectedAuthKind)
+                use(
+                    model: model, credential: value, remember: false, authKind: selectedAuthKind,
+                    desktopCredentialMode: .staticJWT)
             }
             return
         }
 
         // An OIDC token is never stored, whatever the checkbox says.
         let remember = credentialUseKeyAuth && credentialRemember
-        use(model: model, credential: value, remember: remember, authKind: selectedAuthKind)
+        use(
+            model: model, credential: value, remember: remember, authKind: selectedAuthKind,
+            desktopCredentialMode: credentialUseKeyAuth ? nil : .staticJWT)
     }
 
     /// Save an API key without switching, like ccswitch's manual key entry.

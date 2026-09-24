@@ -18,6 +18,7 @@ import {
   agentsForModel,
   applyToAgent,
   agentStatus,
+  buildClaudeDesktopProfile,
 } from "../src/config/agents.js";
 
 const anthropicProfile = {
@@ -685,6 +686,116 @@ test("Claude Desktop Entra OIDC without token needs client id for interactive", 
   await assert.rejects(
     () => applyToAgent("claude-desktop", oidcProfile, { home }),
     /KONG_AI_OIDC_CLIENT_ID/,
+  );
+});
+
+test("Claude Desktop interactive mode ignores token (never mixes with apiKey)", async () => {
+  const home = await scratchHome();
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        header: "Authorization",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+
+  const result = await applyToAgent("claude-desktop", oidcProfile, {
+    home,
+    token: "should-be-ignored",
+    credentialMode: "interactive",
+  });
+  const body = JSON.parse(await readFile(result.file, "utf8"));
+  assert.equal(body.inferenceCredentialKind, "interactive");
+  assert.equal(body.inferenceGatewayApiKey, undefined);
+  assert.equal(body.inferenceGatewayOidc.issuer, "https://idp.example.com/realms/demo");
+  assert.equal(body.inferenceGatewayOidcAuthFlow, "browser");
+});
+
+test("Claude Desktop static mode with token is the default export shape", () => {
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+  const body = buildClaudeDesktopProfile(oidcProfile, {
+    token: "eyJ-static",
+    credentialMode: "static",
+  });
+  assert.equal(body.inferenceCredentialKind, "static");
+  assert.equal(body.inferenceGatewayApiKey, "eyJ-static");
+  assert.equal(body.modelDiscoveryEnabled, false);
+  assert.equal(body.inferenceGatewayBaseUrl, "http://localhost:8000");
+  assert.equal(body.inferenceModels[0].labelOverride, "Claude Opus");
+  assert.equal(body.inferenceGatewayOidc, undefined);
+});
+
+test("Claude Desktop trailing slash, discovery, and label override flags", () => {
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+  const withSlash = buildClaudeDesktopProfile(oidcProfile, {
+    token: "t",
+    trailingSlash: true,
+    modelDiscoveryEnabled: true,
+    includeLabelOverride: false,
+  });
+  assert.equal(withSlash.inferenceGatewayBaseUrl, "http://localhost:8000/");
+  assert.equal(withSlash.modelDiscoveryEnabled, true);
+  assert.equal(withSlash.inferenceModels[0].labelOverride, undefined);
+
+  const interactive = buildClaudeDesktopProfile(oidcProfile, {
+    credentialMode: "interactive",
+    clientId: "my-client",
+    oidcScopes: "openid profile",
+    oidcRedirectPort: 53181,
+    oidcBearerTokenType: "id_token",
+    oidcAppendOfflineAccess: false,
+    oidcAuthFlow: "broker",
+  });
+  assert.equal(interactive.inferenceCredentialKind, "interactive");
+  assert.equal(interactive.inferenceGatewayApiKey, undefined);
+  assert.equal(interactive.inferenceGatewayOidcAuthFlow, "broker");
+  assert.equal(interactive.inferenceGatewayOidc.clientId, "my-client");
+  assert.equal(interactive.inferenceGatewayOidc.scopes, "openid profile");
+  assert.equal(interactive.inferenceGatewayOidc.redirectPort, 53181);
+  assert.equal(interactive.inferenceGatewayOidc.bearerTokenType, "id_token");
+  assert.equal(interactive.inferenceGatewayOidc.appendOfflineAccess, false);
+});
+
+test("Claude Desktop static mode without token is refused", () => {
+  const oidcProfile = {
+    ...anthropicProfile,
+    requiresAuth: true,
+    auth: {
+      required: true,
+      preferred: {
+        kind: "openid-connect",
+        issuer: "https://idp.example.com/realms/demo",
+      },
+    },
+  };
+  assert.throws(
+    () => buildClaudeDesktopProfile(oidcProfile, { credentialMode: "static" }),
+    /needs a bearer token/,
   );
 });
 

@@ -171,6 +171,44 @@ public enum CLIDiscovery {
     }
 }
 
+/// Options forwarded to `use` for Claude Desktop configLibrary writes.
+public struct DesktopWriterOptions: Sendable, Equatable {
+    public var credentialMode: String?
+    public var modelDiscovery: Bool?
+    public var trailingSlash: Bool?
+    public var labelOverride: Bool?
+    public var oidcClientId: String?
+    public var oidcScopes: String?
+    public var oidcRedirectPort: Int?
+    public var oidcBearerTokenType: String?
+    public var oidcAppendOfflineAccess: Bool?
+    public var oidcAuthFlow: String?
+
+    public init(
+        credentialMode: String? = nil,
+        modelDiscovery: Bool? = nil,
+        trailingSlash: Bool? = nil,
+        labelOverride: Bool? = nil,
+        oidcClientId: String? = nil,
+        oidcScopes: String? = nil,
+        oidcRedirectPort: Int? = nil,
+        oidcBearerTokenType: String? = nil,
+        oidcAppendOfflineAccess: Bool? = nil,
+        oidcAuthFlow: String? = nil
+    ) {
+        self.credentialMode = credentialMode
+        self.modelDiscovery = modelDiscovery
+        self.trailingSlash = trailingSlash
+        self.labelOverride = labelOverride
+        self.oidcClientId = oidcClientId
+        self.oidcScopes = oidcScopes
+        self.oidcRedirectPort = oidcRedirectPort
+        self.oidcBearerTokenType = oidcBearerTokenType
+        self.oidcAppendOfflineAccess = oidcAppendOfflineAccess
+        self.oidcAuthFlow = oidcAuthFlow
+    }
+}
+
 public struct KongCLI: Sendable {
     let location: CLILocation
     let runner: any CommandRunner
@@ -269,7 +307,8 @@ public struct KongCLI: Sendable {
         credential: String? = nil,
         save: Bool = true,
         authKind: String? = nil,
-        oidcClientId: String? = nil
+        oidcClientId: String? = nil,
+        desktop: DesktopWriterOptions? = nil
     ) throws -> SwitchResult {
         var args = ["use", model]
         if let environment { args += ["--env", environment] }
@@ -277,8 +316,38 @@ public struct KongCLI: Sendable {
         if let credential, !credential.isEmpty { args += ["--token", credential] }
         if !save { args += ["--save", "false"] }
         if let authKind, !authKind.isEmpty { args += ["--auth", authKind] }
-        if let oidcClientId, !oidcClientId.isEmpty {
-            args += ["--oidc-client-id", oidcClientId]
+        let clientId = oidcClientId ?? desktop?.oidcClientId
+        if let clientId, !clientId.isEmpty {
+            args += ["--oidc-client-id", clientId]
+        }
+        if let desktop {
+            if let mode = desktop.credentialMode, !mode.isEmpty {
+                args += ["--desktop-credential-mode", mode]
+            }
+            if let v = desktop.modelDiscovery {
+                args += ["--desktop-model-discovery", v ? "true" : "false"]
+            }
+            if let v = desktop.trailingSlash {
+                args += ["--desktop-trailing-slash", v ? "true" : "false"]
+            }
+            if let v = desktop.labelOverride {
+                args += ["--desktop-label-override", v ? "true" : "false"]
+            }
+            if let scopes = desktop.oidcScopes, !scopes.isEmpty {
+                args += ["--oidc-scopes", scopes]
+            }
+            if let port = desktop.oidcRedirectPort, port > 0 {
+                args += ["--oidc-redirect-port", String(port)]
+            }
+            if let bearer = desktop.oidcBearerTokenType, !bearer.isEmpty {
+                args += ["--oidc-bearer-token-type", bearer]
+            }
+            if let v = desktop.oidcAppendOfflineAccess {
+                args += ["--oidc-append-offline-access", v ? "true" : "false"]
+            }
+            if let flow = desktop.oidcAuthFlow, !flow.isEmpty {
+                args += ["--oidc-auth-flow", flow]
+            }
         }
         return try run(args, as: SwitchResult.self)
     }

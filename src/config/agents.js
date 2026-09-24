@@ -69,6 +69,7 @@ export const AGENTS = {
       "inferenceGatewayOidcAuthFlow",
       "inferenceCustomHeaders",
       "inferenceModels",
+      "modelDiscoveryEnabled",
     ],
   },
 
@@ -197,23 +198,48 @@ async function readClaudeDesktopMeta(libraryDir) {
  * inferenceProvider / inferenceGateway* keys in configLibrary/<uuid>.json.
  *
  * Credential rules (do not mix modes — that breaks Configure Third-Party Inference):
- * - OIDC **with** a token → `static` + `inferenceGatewayApiKey` (same shape as a
- *   Desktop-exported working profile; token is the gateway Bearer).
- * - OIDC **without** a token → `interactive` + `inferenceGatewayOidc` only, so
- *   Desktop can run its own browser PKCE login.
- * - key-auth / no-auth → `static` as before.
+ * - `credentialMode: "static"` (default when a token is supplied) → static +
+ *   `inferenceGatewayApiKey` (colleague / Desktop-exported shape).
+ * - `credentialMode: "interactive"` → OIDC only; any token is ignored for the file.
+ * - OIDC with no mode and no token → interactive (Desktop owns PKCE).
+ * - key-auth / no-auth → static as before.
+ *
+ * Options:
+ * - credentialMode: "static" | "interactive"
+ * - modelDiscoveryEnabled (default false)
+ * - trailingSlash (default false — strip trailing / on base URL)
+ * - includeLabelOverride (default true when displayName ≠ model id)
+ * - clientId, oidcScopes, oidcRedirectPort, oidcBearerTokenType,
+ *   oidcAppendOfflineAccess, oidcAuthFlow — interactive OIDC nested fields
  */
-export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
-  // Match Desktop-exported profiles: no trailing slash on the gateway base URL.
-  const baseUrl = String(profile.baseUrl ?? "").replace(/\/+$/, "");
+export function buildClaudeDesktopProfile(profile, options = {}) {
+  const {
+    token,
+    clientId,
+    credentialMode: modeOpt,
+    modelDiscoveryEnabled = false,
+    trailingSlash = false,
+    includeLabelOverride = true,
+    oidcScopes,
+    oidcRedirectPort,
+    oidcBearerTokenType,
+    oidcAppendOfflineAccess,
+    oidcAuthFlow,
+  } = options;
+
+  let baseUrl = String(profile.baseUrl ?? "").replace(/\/+$/, "");
+  if (trailingSlash && baseUrl) baseUrl = `${baseUrl}/`;
+
   const modelName = profile.clientModelId ?? profile.name;
   const model = { name: modelName };
   const label = profile.displayName ?? modelName;
-  if (label && label !== modelName) model.labelOverride = label;
+  if (includeLabelOverride && label && label !== modelName) {
+    model.labelOverride = label;
+  }
 
   const next = {
     inferenceGatewayBaseUrl: baseUrl,
-    modelDiscoveryEnabled: false,
+    modelDiscoveryEnabled: Boolean(modelDiscoveryEnabled),
     inferenceModels: [model],
     inferenceProvider: "gateway",
   };
@@ -223,24 +249,39 @@ export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
   const header = preferred?.header ?? "Authorization";
   const issuer = preferred?.issuer ?? null;
 
+  const explicitMode =
+    modeOpt === "static" || modeOpt === "interactive" ? modeOpt : null;
+
   if (kind === "openid-connect" && issuer) {
-    if (token) {
-      // Working Entra/gateway setups use a static Bearer JWT — not interactive+key.
-      next.inferenceCredentialKind = "static";
-      next.inferenceGatewayApiKey = token;
+    // Interactive wins when requested — never write API key alongside OIDC.
+    const useInteractive =
+      explicitMode === "interactive" || (explicitMode == null && !token);
+
+    if (useInteractive) {
+      next.inferenceCredentialKind = "interactive";
+      next.inferenceGatewayOidcAuthFlow =
+        oidcAuthFlow === "broker" ? "broker" : "browser";
+      next.inferenceGatewayOidc = buildOidcBlock({
+        issuer,
+        token,
+        clientId,
+        oidcScopes,
+        oidcRedirectPort,
+        oidcBearerTokenType,
+        oidcAppendOfflineAccess,
+      });
       return next;
     }
-    // No token yet: let Claude Desktop own the PKCE loopback login.
-    next.inferenceCredentialKind = "interactive";
-    next.inferenceGatewayOidcAuthFlow = "browser";
-    next.inferenceGatewayOidc = {
-      issuer,
-      clientId: resolveOidcClientId({ issuer, token, clientId }),
-      scopes: oidcScopesForIssuer(issuer),
-      bearerTokenType: "access_token",
-      redirectPort: Number(process.env.KONG_AI_OIDC_REDIRECT_PORT) || 53180,
-      appendOfflineAccess: true,
-    };
+
+    // Static JWT (default when a token is present, or mode === static).
+    if (!token) {
+      throw new Error(
+        'Claude Desktop credential mode "static" needs a bearer token ' +
+          "(pass --token, or use --desktop-credential-mode interactive).",
+      );
+    }
+    next.inferenceCredentialKind = "static";
+    next.inferenceGatewayApiKey = token;
     return next;
   }
 
@@ -262,6 +303,40 @@ export function buildClaudeDesktopProfile(profile, { token, clientId } = {}) {
   }
 
   return next;
+}
+
+function buildOidcBlock({
+  issuer,
+  token,
+  clientId,
+  oidcScopes,
+  oidcRedirectPort,
+  oidcBearerTokenType,
+  oidcAppendOfflineAccess,
+}) {
+  const scopes =
+    (typeof oidcScopes === "string" && oidcScopes.trim()) ||
+    process.env.KONG_AI_OIDC_SCOPES ||
+    oidcScopesForIssuer(issuer);
+  const port =
+    Number(oidcRedirectPort) ||
+    Number(process.env.KONG_AI_OIDC_REDIRECT_PORT) ||
+    53180;
+  const bearer =
+    oidcBearerTokenType === "id_token" ? "id_token" : "access_token";
+  const appendOffline =
+    oidcAppendOfflineAccess === undefined
+      ? true
+      : Boolean(oidcAppendOfflineAccess);
+
+  return {
+    issuer,
+    clientId: resolveOidcClientId({ issuer, token, clientId }),
+    scopes,
+    bearerTokenType: bearer,
+    redirectPort: port,
+    appendOfflineAccess: appendOffline,
+  };
 }
 
 /** Entra / Keycloak need different default public-client ids and scopes. */
@@ -317,7 +392,8 @@ function clientIdFromJwt(token) {
   }
 }
 
-async function applyClaudeDesktop3p(agent, profile, { token, home, clientId }) {
+async function applyClaudeDesktop3p(agent, profile, options) {
+  const { token, home, clientId, ...writerOpts } = options;
   const libraryDir = agent.configPath(home);
   await mkdir(libraryDir, { recursive: true });
 
@@ -330,7 +406,11 @@ async function applyClaudeDesktop3p(agent, profile, { token, home, clientId }) {
     );
   }
   const profileFile = path.join(libraryDir, `${profileId}.json`);
-  const body = buildClaudeDesktopProfile(profile, { token, clientId });
+  const body = buildClaudeDesktopProfile(profile, {
+    token,
+    clientId,
+    ...writerOpts,
+  });
   await writeAtomic(profileFile, JSON.stringify(body, null, 2) + "\n");
 
   // Drop the pre-0.2.3 invalid id so Claude Desktop's library list stays loadable.
@@ -702,7 +782,25 @@ function applyCopilotSettings(settings, profile) {
  * Point one agent at a model.
  * @returns {{agent: string, file: string, created: boolean, envFile?: string}}
  */
-export async function applyToAgent(agentId, profile, { token, home = homedir(), authKind, clientId } = {}) {
+export async function applyToAgent(
+  agentId,
+  profile,
+  {
+    token,
+    home = homedir(),
+    authKind,
+    clientId,
+    credentialMode,
+    modelDiscoveryEnabled,
+    trailingSlash,
+    includeLabelOverride,
+    oidcScopes,
+    oidcRedirectPort,
+    oidcBearerTokenType,
+    oidcAppendOfflineAccess,
+    oidcAuthFlow,
+  } = {},
+) {
   const agent = getAgent(agentId);
   const effective = authKind ? { ...profile, auth: authWithKind(profile.auth, authKind) } : profile;
 
@@ -745,7 +843,20 @@ export async function applyToAgent(agentId, profile, { token, home = homedir(), 
   }
 
   if (agent.kind === "claude-desktop-3p") {
-    return applyClaudeDesktop3p(agent, effective, { token, home, clientId });
+    return applyClaudeDesktop3p(agent, effective, {
+      token,
+      home,
+      clientId,
+      credentialMode,
+      modelDiscoveryEnabled,
+      trailingSlash,
+      includeLabelOverride,
+      oidcScopes,
+      oidcRedirectPort,
+      oidcBearerTokenType,
+      oidcAppendOfflineAccess,
+      oidcAuthFlow,
+    });
   }
 
   throw new Error(`Agent "${agentId}" has no writer.`);

@@ -15,6 +15,8 @@ struct MenuView: View {
                 missingCLI
             } else if state.showingSetup {
                 SetupView(state: state, editing: state.editingEnvironment)
+            } else if state.showingDesktopSettings {
+                DesktopSettingsView(state: state)
             } else if let profile = state.credentialFor {
                 CredentialView(state: state, profile: profile)
             } else if state.environments.isEmpty {
@@ -572,6 +574,10 @@ struct MenuView: View {
                     .disabled(state.busy != nil || state.environments.isEmpty)
                 Button("Refresh") { state.refresh() }
                     .disabled(state.busy != nil)
+                if state.selectedAgentId == "claude-desktop" {
+                    Button("Desktop…") { state.beginDesktopSettings() }
+                        .disabled(state.busy != nil)
+                }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }

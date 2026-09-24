@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.5
+
+### Features
+- **Claude Desktop writer options in the macOS app** — footer **Desktop…** opens settings for credential mode (Static JWT / Interactive OIDC), model discovery, trailing slash, label override, and OIDC fields (client id, scopes, redirect port, bearer token type, offline access, auth flow). Credential sheet shows the same mode picker. Prefs persist in UserDefaults; every Desktop switch forwards matching CLI flags. Interactive mode never writes `inferenceGatewayApiKey`.
+
+### CLI
+- `use` accepts `--desktop-credential-mode`, `--desktop-model-discovery`, `--desktop-trailing-slash`, `--desktop-label-override`, and OIDC field flags (`--oidc-scopes`, `--oidc-redirect-port`, `--oidc-bearer-token-type`, `--oidc-append-offline-access`, `--oidc-auth-flow`).
+
 ## 0.2.4
 
 ### Fixes

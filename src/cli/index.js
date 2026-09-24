@@ -71,6 +71,14 @@ Models:
   kong-ai-switch list [--env <name>] [--all] [--json]
   kong-ai-switch use <model> [--env <name>] [--agent <a,b>] [--token <t>] [--auth <kind>]
                        [--oidc-client-id <id>]
+                       [--desktop-credential-mode static|interactive]
+                       [--desktop-model-discovery true|false]
+                       [--desktop-trailing-slash true|false]
+                       [--desktop-label-override true|false]
+                       [--oidc-scopes <s>] [--oidc-redirect-port <n>]
+                       [--oidc-bearer-token-type access_token|id_token]
+                       [--oidc-append-offline-access true|false]
+                       [--oidc-auth-flow browser|broker]
   kong-ai-switch credential set <model> --token <key> [--env <name>]
   kong-ai-switch credential clear <model> [--env <name>]
   kong-ai-switch credential show <model> [--env <name>]
@@ -321,6 +329,68 @@ function normalizeAuthKind(value) {
   if (kind === AUTH_KIND.KEY_AUTH || kind === "key-auth") return AUTH_KIND.KEY_AUTH;
   if (kind === AUTH_KIND.OIDC || kind === "oidc" || kind === "openid-connect") return AUTH_KIND.OIDC;
   throw new UserError(`Unknown auth kind "${value}". Use key-auth or openid-connect.`);
+}
+
+/** Parse Claude Desktop writer flags from `use` (defaults match a working export). */
+function parseDesktopWriterFlags(flags) {
+  const boolFlag = (name, fallback) => {
+    const v = flags[name];
+    if (v === undefined || v === null) return fallback;
+    if (v === true || v === "true" || v === "1") return true;
+    if (v === false || v === "false" || v === "0") return false;
+    throw new UserError(`--${name} expects true or false (got "${v}").`);
+  };
+
+  let credentialMode;
+  if (typeof flags["desktop-credential-mode"] === "string") {
+    const mode = flags["desktop-credential-mode"].trim().toLowerCase();
+    if (mode !== "static" && mode !== "interactive") {
+      throw new UserError(
+        `--desktop-credential-mode expects static or interactive (got "${mode}").`,
+      );
+    }
+    credentialMode = mode;
+  }
+
+  const oidcScopes =
+    typeof flags["oidc-scopes"] === "string" ? flags["oidc-scopes"] : undefined;
+  let oidcRedirectPort;
+  if (flags["oidc-redirect-port"] != null && flags["oidc-redirect-port"] !== true) {
+    oidcRedirectPort = Number(flags["oidc-redirect-port"]);
+    if (!Number.isFinite(oidcRedirectPort) || oidcRedirectPort <= 0) {
+      throw new UserError("--oidc-redirect-port must be a positive port number.");
+    }
+  }
+  let oidcBearerTokenType;
+  if (typeof flags["oidc-bearer-token-type"] === "string") {
+    const t = flags["oidc-bearer-token-type"].trim();
+    if (t !== "access_token" && t !== "id_token") {
+      throw new UserError(
+        `--oidc-bearer-token-type expects access_token or id_token (got "${t}").`,
+      );
+    }
+    oidcBearerTokenType = t;
+  }
+  let oidcAuthFlow;
+  if (typeof flags["oidc-auth-flow"] === "string") {
+    const f = flags["oidc-auth-flow"].trim();
+    if (f !== "browser" && f !== "broker") {
+      throw new UserError(`--oidc-auth-flow expects browser or broker (got "${f}").`);
+    }
+    oidcAuthFlow = f;
+  }
+
+  return {
+    credentialMode,
+    modelDiscoveryEnabled: boolFlag("desktop-model-discovery", undefined),
+    trailingSlash: boolFlag("desktop-trailing-slash", undefined),
+    includeLabelOverride: boolFlag("desktop-label-override", undefined),
+    oidcScopes,
+    oidcRedirectPort,
+    oidcBearerTokenType,
+    oidcAppendOfflineAccess: boolFlag("oidc-append-offline-access", undefined),
+    oidcAuthFlow,
+  };
 }
 
 async function resolveModelProfile(envName, modelName) {
@@ -968,12 +1038,20 @@ async function cmdUse(positional, flags) {
   const authKind = normalizeAuthKind(flags.auth) ?? auth.preferred?.kind;
   const effectiveAuth = authWithKind(auth, authKind) ?? auth;
 
+  const desktopWriter = parseDesktopWriterFlags(flags);
+  // Interactive Desktop OIDC needs no pasted token — Desktop runs PKCE.
+  const desktopInteractive =
+    requestedAgents.includes("claude-desktop") &&
+    desktopWriter.credentialMode === "interactive" &&
+    (effectiveAuth.preferred?.kind === "openid-connect" ||
+      effectiveAuth.kind === "openid-connect");
+
   const { credential } = await resolveModelCredential(env.name, profile.name, {
     explicit,
     kind: authKind,
   });
 
-  if (effectiveAuth.required && !credential) {
+  if (effectiveAuth.required && !credential && !desktopInteractive) {
     throw new UserError(describeMissingCredential(profile, effectiveAuth, env.name));
   }
 
@@ -990,7 +1068,8 @@ async function cmdUse(positional, flags) {
     }
   }
 
-  const token = credential;
+  // Never pass a token into an interactive Desktop write (would mix modes).
+  const token = desktopInteractive ? undefined : credential;
   const profileForAgent = authKind
     ? { ...profile, auth: effectiveAuth }
     : profile;
@@ -1003,11 +1082,26 @@ async function cmdUse(positional, flags) {
     // Claude Desktop shares Claude Code's file; writing twice is wasted work.
     if (agent.sharesConfigWith && requestedAgents.includes(agent.sharesConfigWith)) continue;
     try {
+      const desktopOpts =
+        agentId === "claude-desktop"
+          ? {
+              credentialMode: desktopWriter.credentialMode,
+              modelDiscoveryEnabled: desktopWriter.modelDiscoveryEnabled,
+              trailingSlash: desktopWriter.trailingSlash,
+              includeLabelOverride: desktopWriter.includeLabelOverride,
+              oidcScopes: desktopWriter.oidcScopes,
+              oidcRedirectPort: desktopWriter.oidcRedirectPort,
+              oidcBearerTokenType: desktopWriter.oidcBearerTokenType,
+              oidcAppendOfflineAccess: desktopWriter.oidcAppendOfflineAccess,
+              oidcAuthFlow: desktopWriter.oidcAuthFlow,
+            }
+          : {};
       applied.push(
         await applyToAgent(agentId, profileForAgent, {
           token,
           authKind,
           clientId: oidcClientId,
+          ...desktopOpts,
         }),
       );
     } catch (cause) {
