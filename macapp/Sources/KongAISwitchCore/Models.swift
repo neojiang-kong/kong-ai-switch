@@ -7,6 +7,9 @@ import Foundation
 /// shapes. That keeps one implementation of anything that touches Konnect or
 /// the user's settings file.
 
+/// Konnect region keys, matching `KONNECT_REGIONS` in `src/kong/client.js`.
+public let konnectRegions = ["us", "eu", "au", "me", "in", "sg"]
+
 public struct KongEnvironment: Codable, Identifiable, Hashable, Sendable {
     public let name: String
     /// Human label for the Konnect organization, when known.

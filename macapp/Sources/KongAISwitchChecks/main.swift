@@ -334,6 +334,26 @@ do {
     check("threw the wrong error type: \(error)", false)
 }
 
+// MARK: - Regions
+
+section("Regions")
+
+let clientSource = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("../../../src/kong/client.js")
+    .standardized
+if let source = try? String(contentsOf: clientSource, encoding: .utf8) {
+    let block = source.components(separatedBy: "export const KONNECT_REGIONS = {").last?
+        .components(separatedBy: "};").first ?? ""
+    let cliRegions = block.split(separator: "\n").compactMap { line -> String? in
+        let parts = line.trimmingCharacters(in: .whitespaces).split(separator: ":", maxSplits: 1)
+        return parts.count == 2 ? String(parts[0]) : nil
+    }
+    checkEqual("Swift region list matches KONNECT_REGIONS", konnectRegions, cliRegions)
+} else {
+    print("  skip region sync check: \(clientSource.path) not readable")
+}
+
 // MARK: - Summary
 
 print("\n\(checks - failures)/\(checks) checks passed")

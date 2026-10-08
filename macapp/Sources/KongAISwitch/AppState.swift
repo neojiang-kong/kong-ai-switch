@@ -40,6 +40,8 @@ final class AppState: ObservableObject {
     // ObservableObject needs no macro plugin and works the same way here.
     @Published var formName = ""
     @Published var formRegion = "us"
+    /// Region searched on the token step; empty means search every region.
+    @Published var formDiscoveryRegion = ""
     @Published var formProxyUrl = ""
     @Published var formToken = ""
     @Published var formError: String?
@@ -723,6 +725,7 @@ final class AppState: ObservableObject {
         editingEnvironment = editing
         formName = editing?.name ?? ""
         formRegion = editing?.region ?? "us"
+        formDiscoveryRegion = editing?.region ?? ""
         formProxyUrl = editing?.proxyUrl ?? ""
         formToken = ""
         formError = nil
@@ -753,12 +756,14 @@ final class AppState: ObservableObject {
             return
         }
 
+        let region = formDiscoveryRegion.isEmpty ? nil : formDiscoveryRegion
+        if let region { formRegion = region }
         discovering = true
         formError = nil
 
         Task.detached(priority: .userInitiated) {
             do {
-                let result = try cli.discover(token: token, region: nil)
+                let result = try cli.discover(token: token, region: region)
                 await MainActor.run {
                     self.discovering = false
                     self.discovered = result.gateways
@@ -766,7 +771,9 @@ final class AppState: ObservableObject {
 
                     if result.gateways.isEmpty {
                         self.formError =
-                            "That token works, but no AI Gateways were found in any region."
+                            region.map {
+                                "That token works, but no AI Gateways were found in \($0.uppercased()). Try Auto-detect or another region."
+                            } ?? "That token works, but no AI Gateways were found in any region."
                         return
                     }
                     // One gateway is the common case; skip the picker.

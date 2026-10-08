@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.6
+
+### Features
+- **Konnect region selection in the macOS app** — the token step of environment setup has a **Region** picker (Auto-detect, US, EU, AU, ME, IN, SG). Auto-detect searches every region as before; picking one runs discovery against that region only. The confirm/edit step also has a Region picker, preselected from the discovered gateway or the existing environment, and the choice is saved with the environment.
+- Setup panel now uses the same 380pt width as the rest of the menu bar panel.
+
 ## 0.2.5
 
 ### Features

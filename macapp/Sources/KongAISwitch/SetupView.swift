@@ -24,6 +24,11 @@ struct SetupView: View {
 
     private var isEditing: Bool { editing != nil }
 
+    /// Known regions, plus the current value when it is a custom control plane URL.
+    private var regionChoices: [String] {
+        konnectRegions.contains(state.formRegion) ? konnectRegions : konnectRegions + [state.formRegion]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             switch state.setupStep {
@@ -33,7 +38,7 @@ struct SetupView: View {
             }
         }
         .padding(14)
-        .frame(width: 340)
+        .frame(width: 380)
     }
 
     // MARK: Step 1 — the token
@@ -58,6 +63,19 @@ struct SetupView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            field("Region") {
+                Picker("Region", selection: $state.formDiscoveryRegion) {
+                    Text("Auto-detect (search all)").tag("")
+                    Divider()
+                    ForEach(konnectRegions, id: \.self) { region in
+                        Text(region.uppercased()).tag(region)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             errorText
 
@@ -147,6 +165,17 @@ struct SetupView: View {
                 TextField("mine", text: $state.formName)
                     .textFieldStyle(.roundedBorder)
                     .disabled(isEditing)  // The CLI treats name as immutable.
+            }
+
+            field("Region") {
+                Picker("Region", selection: $state.formRegion) {
+                    ForEach(regionChoices, id: \.self) { region in
+                        Text(region.uppercased()).tag(region)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             // Always editable. Discovery may prefill it, but the data plane is
