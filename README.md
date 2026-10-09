@@ -35,12 +35,15 @@ The API key never reaches the developer. Kong holds the upstream credential on t
 
 ## Download (macOS menu bar app)
 
-Pre-built app (**v0.2.1**, Apple Silicon / ad-hoc signed):
+Pre-built app (**latest release**, Apple Silicon / ad-hoc signed):
 
-- [GitHub Release v0.2.1](https://github.com/neojiang-kong/kong-ai-switch/releases/tag/v0.2.1) (recommended)
+- [Latest GitHub Release](https://github.com/neojiang-kong/kong-ai-switch/releases/latest) (recommended)
+- [Direct download: `KongAISwitch-macOS.zip`](https://github.com/neojiang-kong/kong-ai-switch/releases/latest/download/KongAISwitch-macOS.zip)
 - [`dist/KongAISwitch-macOS.zip`](dist/KongAISwitch-macOS.zip)
 
 Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized.
+
+Environment setup in the app has a Konnect **Region** picker (Auto-detect, US, EU, AU, ME, IN, SG). Claude Desktop options — credential mode (Static JWT vs Interactive OIDC) and OIDC fields — live under the **Desktop…** button in the panel footer.
 
 **Requirement:** [Node.js 20+](https://nodejs.org/) (`brew install node`). The CLI ships **inside the app** — no separate checkout or `npm install` needed.
 
@@ -132,7 +135,7 @@ Every model command takes `--env <name>` to act on one environment without chang
 
 ## What it writes
 
-Each agent has its own config file, and only the keys this tool owns are touched. Claude Code and Claude Desktop share `~/.claude/settings.json`; Codex gets a delimited block in `~/.codex/config.toml`, leaving the rest of that file verbatim.
+Each agent has its own config file, and only the keys this tool owns are touched. Claude Code uses `~/.claude/settings.json`; Claude Desktop gets its own profile in `~/Library/Application Support/Claude-3p/configLibrary/`; Codex gets a delimited block in `~/.codex/config.toml`, leaving the rest of that file verbatim.
 
 For Claude Code, switching rewrites four keys under `env` and leaves everything else alone:
 
