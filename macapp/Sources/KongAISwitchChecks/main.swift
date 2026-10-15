@@ -368,7 +368,22 @@ do {
     checkEqual("attribution decodes auto repository", result.attribution.repositoryAuto, true)
     checkEqual("attribution decodes extra headers", result.attribution.headers.map(\.name), ["ai-cost-team"])
     checkEqual("attribution reports the wrapper", result.needsWrapper, true)
-    checkEqual("show passes --env", Array(runner.arguments.dropFirst().prefix(4)), ["attribution", "show", "--env", "acme"])
+    checkEqual(
+        "show passes --agent and --env", Array(runner.arguments.dropFirst().prefix(6)),
+        ["attribution", "show", "--agent", "claude-code", "--env", "acme"])
+    checkEqual("pre-0.2.9 JSON decodes without an agent", result.agent, nil)
+} catch {
+    check("attribution decoding threw: \(error)", false)
+}
+
+do {
+    let runner = RecordingRunner(stdout: attributionJSON.replacingOccurrences(
+        of: #""ok":true,"#, with: #""ok":true,"agent":"codex","#))
+    let result = try makeCLI(runner).showAttribution(environment: nil, agent: .codex)
+    checkEqual("Codex attribution decodes its agent", result.agent, "codex")
+    checkEqual(
+        "Codex show passes --agent codex", Array(runner.arguments.dropFirst().prefix(4)),
+        ["attribution", "show", "--agent", "codex"])
 } catch {
     check("attribution decoding threw: \(error)", false)
 }
@@ -382,11 +397,46 @@ checkEqual(
     "set arguments replace the whole record with --flag=value",
     Attribution.setArguments(environment: "acme", settings: attributionSample),
     [
-        "attribution", "set", "--env", "acme", "--enabled=true", "--hint-headers=false",
-        "--project=payments-api", "--scm-provider=github", "--repository=auto", "--branch=main",
-        "--clear-headers", "--header=x-cost-center: --42",
+        "attribution", "set", "--agent", "claude-code", "--env", "acme", "--enabled=true",
+        "--hint-headers=false", "--project=payments-api", "--scm-provider=github", "--repository=auto",
+        "--branch=main", "--clear-headers", "--header=x-cost-center: --42",
     ]
 )
+checkEqual(
+    "Codex set arguments leave out the flags Codex refuses",
+    Attribution.setArguments(environment: "acme", settings: attributionSample, agent: .codex),
+    [
+        "attribution", "set", "--agent", "codex", "--env", "acme", "--enabled=true",
+        "--project=payments-api", "--branch=main", "--clear-headers", "--header=x-cost-center: --42",
+    ]
+)
+checkEqual(
+    "Codex preview drops the fields Codex sends itself",
+    Attribution.preview(attributionSample, agent: .codex),
+    "ai-cost-project: payments-api\nai-cost-scm-branch: main\nx-cost-center: --42"
+)
+check(
+    "Codex refuses a repository header it sends itself",
+    Attribution.validationError(
+        AttributionSettings(headers: [AttributionHeader(name: "ai-cost-scm-repository", value: "x")]),
+        agent: .codex
+    )?.contains("Codex sends the repository itself") == true
+)
+checkEqual(
+    "Codex auto-sent tags match what Kong reports",
+    AttributionAgent.codex.autoSentTags.map(\.name),
+    [
+        "Agent session", "Agent request kind", "Repository", "Source control provider", "Commit",
+        "Agent ID", "Parent agent", "Agent type",
+    ]
+)
+checkEqual("Codex fields are branch then project", AttributionAgent.codex.fields, [.branch, .project])
+checkEqual(
+    "Codex source line points at its own wrapper",
+    AttributionAgent.codex.sourceLine,
+    #"[ -f "$HOME/.kong-ai-switch/codex-attribution.sh" ] && source "$HOME/.kong-ai-switch/codex-attribution.sh""#
+)
+checkEqual("Claude source line is unchanged", Attribution.sourceLine, AttributionAgent.claudeCode.sourceLine)
 checkEqual(
     "preview lists static then git-derived headers",
     Attribution.preview(attributionSample),

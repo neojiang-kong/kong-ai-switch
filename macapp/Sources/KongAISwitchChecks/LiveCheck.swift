@@ -68,6 +68,19 @@ enum LiveCheck {
                 : "\(result.environment): disabled"
         }
 
+        attempt("attribution show --agent codex") {
+            guard let envs = try? cli.listEnvironments(), !envs.isEmpty else {
+                return "skipped (no environments defined yet)"
+            }
+            let result = try cli.showAttribution(environment: nil, agent: .codex)
+            guard result.agent == "codex" else {
+                throw NSError(domain: "LiveCheck", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "expected agent codex, got \(result.agent ?? "none")",
+                ])
+            }
+            return "\(result.environment): \(result.attribution.enabled ? "enabled" : "disabled")"
+        }
+
         // Discovery is the step that makes setup token-first, so check it
         // resolves a gateway and its proxy URL from a token alone.
         if let token = ProcessInfo.processInfo.environment["LIVE_TOKEN"] {

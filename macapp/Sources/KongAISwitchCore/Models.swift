@@ -208,12 +208,14 @@ public struct SwitchResult: Codable, Sendable {
     public let gateway: String
     public let settingsFile: String
     public let created: Bool
-    /// Present when Claude Code was switched; nil for other agents.
+    /// Present when Claude Code or Codex was switched; nil for other agents.
     public let attribution: SwitchAttribution?
 }
 
-/// What a Claude Code switch did with the environment's cost attribution.
+/// What a Claude Code or Codex switch did with the environment's cost attribution.
 public struct SwitchAttribution: Codable, Sendable {
+    /// Absent from pre-0.2.9 CLIs, which only attributed Claude Code.
+    public let agent: String?
     public let enabled: Bool
     public let hintHeaders: Bool
     public let preview: String

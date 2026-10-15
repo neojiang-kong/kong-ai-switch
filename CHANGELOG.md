@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.9
+
+### Features
+- **Cost attribution for Codex.** Kong reports Agent session, Agent request kind, Repository, Source control provider, Commit, Agent ID, Parent agent and Agent type from Codex itself, so only **Branch** (`ai-cost-scm-branch`) and **Project** (`ai-cost-project`) need headers, plus any custom headers.
+- Static values go into the managed `[model_providers.kong]` block of `~/.codex/config.toml` as an inline `http_headers` table, merged after the key-auth credential (never dropped). **Branch: Auto from git** uses `env_http_headers = { ai-cost-scm-branch = "KONG_AI_SCM_BRANCH" }` and writes `~/.kong-ai-switch/codex-attribution.sh`, a sourceable `codex()` wrapper that sets the variable from `git branch --show-current` per launch. Rc files are never edited. Disabling removes only attribution entries.
+- The app's **Attribution…** button now appears for Codex too. The panel follows the selected agent: its own "Sent by … automatically" list and only the fields that agent needs headers for. The hint-headers toggle is Claude Code only.
+
+### CLI
+- `attribution set|show|clear` take `--agent claude-code|codex` (default `claude-code`). For Codex, `--scm-provider`, `--repository` and `--hint-headers` are refused with an explanation. `use --agent codex` applies the stored Codex attribution, and `set`/`clear` re-apply immediately when Codex already points at that environment.
+- `--json` keeps its existing fields (for the chosen agent) and adds `agent` plus an `agents` map with every agent's attribution.
+
+### Changes
+- Attribution is stored per agent within each environment (`attribution.claudeCode`, `attribution.codex`). The 0.2.7/0.2.8 single record is read as Claude Code's and migrated on the next save; `env export`/`env import` carry both shapes.
+- Claude Code attribution output and behaviour are unchanged.
+
 ## 0.2.8
 
 ### Changes

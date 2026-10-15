@@ -130,7 +130,7 @@ On macOS, tokens go to the login Keychain, so they stay out of your dotfiles and
 | `list` | Show switchable models for an agent. `--agent codex` to scope it, `--all` to include unusable ones, `--json` for scripting |
 | `use <model>` | Point an agent at a model. `--agent codex` or `--agent claude-code,codex` |
 | `status` | Show where Claude Code points, and which environment it came from |
-| `attribution set\|show\|clear` | Cost-attribution headers Claude Code sends, per environment (see below) |
+| `attribution set\|show\|clear` | Cost-attribution headers Claude Code or Codex (`--agent codex`) sends, per environment (see below) |
 
 Every model command takes `--env <name>` to act on one environment without changing the active one.
 
@@ -148,7 +148,7 @@ Kong AI Gateway can attribute spend by request headers such as `ai-cost-project`
 
 `ai-cost-project` and any custom `--header` are sent as **additional headers** beyond those three tags. `attribution show` and the app's Attribution panel use the same three groups; `attribution show --json` adds them under `tags` (`autoSent`, `fromHeaders`, `additional`).
 
-Attribution is stored **per environment** in `~/.kong-ai-switch/config.json`, so each Konnect org or customer can carry its own project. It is applied on every `use --agent claude-code`, and immediately when Claude Code already points at that environment. In the app, select Claude Code and choose **Attribution…** in the footer.
+Attribution is stored **per environment and agent** in `~/.kong-ai-switch/config.json` (`attribution.claudeCode`, `attribution.codex`; a 0.2.7/0.2.8 record is read as Claude Code's), so each Konnect org or customer can carry its own project. It is applied on every `use --agent claude-code`, and immediately when Claude Code already points at that environment. In the app, select Claude Code (or Codex) and choose **Attribution…** in the footer. `--agent` defaults to `claude-code`.
 
 ```bash
 kong-ai-switch attribution set --project payments-api --scm-provider github \
@@ -167,6 +167,32 @@ kong-ai-switch attribution clear
   The wrapper passes the headers both as the environment variable and through `claude --settings`, because `settings.json` `env` takes precedence over the inherited environment. Launches that do not go through the shell (IDE extensions, for example) still send the static headers.
 - `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` is set whenever attribution is on; turn it off with `--hint-headers false`. `--header` is repeatable; `--remove-header <Name>` and `--clear-headers` drop custom ones.
 - Header names must be valid HTTP tokens and values a single line. `apikey`, `Authorization` and `x-api-key` are reserved for the gateway credential.
+
+### Codex
+
+Codex reports more on its own, so only branch and project need headers.
+
+| Sent by Codex on its own | From the headers you add |
+| --- | --- |
+| Agent session, Agent request kind, Repository, Source control provider, Commit, Agent ID, Parent agent, Agent type | Branch (`ai-cost-scm-branch`) |
+| | Project (`ai-cost-project`) |
+
+```bash
+kong-ai-switch attribution set --agent codex --project payments-api --branch auto \
+  --header 'ai-cost-team: platform'
+kong-ai-switch attribution show --agent codex
+kong-ai-switch use my-gpt --agent codex
+```
+
+- **Static values** (project, a fixed branch, custom headers) go into the managed `[model_providers.kong]` block of `~/.codex/config.toml` as an inline `http_headers = { … }` table, after the key-auth credential header, which is never dropped. Inline tables keep the provider table closed, so keys after it are never swallowed into a header table.
+- **`--branch auto`** adds `env_http_headers = { ai-cost-scm-branch = "KONG_AI_SCM_BRANCH" }`; Codex sends that header when the variable is set. The switch writes `~/.kong-ai-switch/codex-attribution.sh`, a `codex()` wrapper that sets `KONG_AI_SCM_BRANCH` from `git branch --show-current` for each launch. Add it to `~/.zshrc` once:
+
+  ```bash
+  [ -f "$HOME/.kong-ai-switch/codex-attribution.sh" ] && source "$HOME/.kong-ai-switch/codex-attribution.sh"
+  ```
+
+  Outside a git repo, or when launched without the wrapper, the variable is unset and Codex omits the branch header.
+- `--scm-provider`, `--repository` and `--hint-headers` are refused for Codex (it sends repository and provider itself). Turning attribution off removes only the attribution entries from `http_headers` and the `env_http_headers` line.
 
 ## What it writes
 

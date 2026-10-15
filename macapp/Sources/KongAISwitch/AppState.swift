@@ -303,15 +303,21 @@ final class AppState: ObservableObject {
         activeEnvironment?.label ?? activeEnvironmentName ?? "—"
     }
 
-    /// Load the active environment's attribution from the CLI, then show the panel.
+    /// The agent whose attribution the footer button edits, if it has any.
+    var selectedAttributionAgent: AttributionAgent? {
+        AttributionAgent(rawValue: selectedAgentId)
+    }
+
+    /// Load the active environment's attribution for the selected agent, then show the panel.
     func beginAttributionSettings() {
+        guard let agent = selectedAttributionAgent else { return }
         let name = activeEnvironmentName
         attributionError = nil
         perform("Loading attribution") { cli in
-            try cli.showAttribution(environment: name)
+            try cli.showAttribution(environment: name, agent: agent)
         } then: { result in
             self.attributionEnvironment = result.environment
-            self.attributionDraft = AttributionDraft(settings: result.attribution)
+            self.attributionDraft = AttributionDraft(settings: result.attribution, agent: agent)
             self.showingAttributionSettings = true
         }
     }
@@ -332,7 +338,7 @@ final class AppState: ObservableObject {
 
     func copyAttributionSourceLine() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(Attribution.sourceLine, forType: .string)
+        NSPasteboard.general.setString(attributionDraft.agent.sourceLine, forType: .string)
         toast = "Copied. Paste it into ~/.zshrc, then open a new terminal."
     }
 
@@ -348,18 +354,19 @@ final class AppState: ObservableObject {
         }
         let name = attributionEnvironment ?? activeEnvironmentName
         let settings = draft.resolved
+        let agent = draft.agent
         attributionSaving = true
         attributionError = nil
         busy = "Saving attribution"
 
         Task.detached(priority: .userInitiated) {
             do {
-                let result = try cli.setAttribution(environment: name, settings: settings)
+                let result = try cli.setAttribution(environment: name, settings: settings, agent: agent)
                 await MainActor.run {
                     self.attributionSaving = false
                     self.busy = nil
                     self.showingAttributionSettings = false
-                    self.toast = Self.attributionToast(result)
+                    self.toast = Self.attributionToast(result, agent: agent)
                 }
             } catch {
                 await MainActor.run {
@@ -371,15 +378,15 @@ final class AppState: ObservableObject {
         }
     }
 
-    private static func attributionToast(_ result: AttributionResult) -> String {
+    private static func attributionToast(_ result: AttributionResult, agent: AttributionAgent) -> String {
         guard result.attribution.enabled else {
             return result.applied == true
-                ? "Attribution off for \(result.environment). Restart Claude Code."
+                ? "Attribution off for \(result.environment). Restart \(agent.name)."
                 : "Attribution off for \(result.environment)."
         }
         var text = result.applied == true
-            ? "Attribution saved and applied. Restart Claude Code."
-            : "Attribution saved. Applied on the next Claude Code switch."
+            ? "Attribution saved and applied. Restart \(agent.name)."
+            : "Attribution saved. Applied on the next \(agent.name) switch."
         if result.needsWrapper {
             text += " Git values need the source line in ~/.zshrc."
         }

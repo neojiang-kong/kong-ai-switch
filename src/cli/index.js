@@ -53,15 +53,21 @@ import {
   agentStatus,
   agentsForModel,
   applyClaudeAttribution,
+  applyCodexAttribution,
   claudeCredentialHeader,
 } from "../config/agents.js";
 import {
+  ATTRIBUTION_AGENTS,
+  ATTRIBUTION_AGENT_IDS,
   AttributionError,
+  CODEX_BRANCH_ENV,
   SCM_PROVIDERS,
   describeAttribution,
   normalizeAttribution,
+  normalizeStoredAttribution,
   parseHeaderLine,
-  readAttribution,
+  putAgentAttribution,
+  readAgentAttribution,
   validateHeaderName,
 } from "../config/attribution.js";
 
@@ -97,18 +103,21 @@ Models:
   kong-ai-switch agents                                 which agents, and where they point
   kong-ai-switch status
 
-Cost attribution (Claude Code, stored per environment):
-  kong-ai-switch attribution set [--env <name>] [--project <p>]
+Cost attribution (Claude Code or Codex, stored per environment and agent):
+  kong-ai-switch attribution set [--agent claude-code|codex] [--env <name>]
+                       [--project <p>] [--branch <name>|auto]
                        [--scm-provider github|gitlab|bitbucket|azure-devops|other]
-                       [--repository <owner/repo>|auto] [--branch <name>|auto]
+                       [--repository <owner/repo>|auto]
                        [--header 'Name: value']... [--remove-header <Name>]...
                        [--clear-headers] [--hint-headers true|false]
                        [--enabled true|false]
-  kong-ai-switch attribution show [--env <name>] [--json]
-  kong-ai-switch attribution clear [--env <name>]
-  Applied by "use --agent claude-code" (and immediately when Claude Code already
-  points at this environment). "auto" reads git at launch via a shell wrapper:
-  add the printed source line to ~/.zshrc.
+  kong-ai-switch attribution show [--agent claude-code|codex] [--env <name>] [--json]
+  kong-ai-switch attribution clear [--agent claude-code|codex] [--env <name>]
+  --agent defaults to claude-code. Codex sends the repository and source control
+  provider itself, so --scm-provider, --repository and --hint-headers are
+  Claude Code only. Applied by "use --agent <agent>" (and immediately when that
+  agent already points at this environment). "auto" reads git at launch via a
+  shell wrapper: add the printed source line to ~/.zshrc.
 
 Every model command takes --env to act on one environment without changing
 the active one.
@@ -564,11 +573,11 @@ function sameBaseUrl(a, b) {
 }
 
 /**
- * When Claude Code already points at a model from this environment, rewrite
+ * When the agent already points at a model from this environment, rewrite
  * its headers now so a change takes effect without another switch.
  */
-async function reapplyAttributionIfActive(envName, attribution, previous) {
-  const status = await agentStatus("claude-code").catch(() => null);
+async function reapplyAttributionIfActive(envName, agentId, attribution, previous) {
+  const status = await agentStatus(agentId).catch(() => null);
   if (!status?.configured) return { applied: false };
   const state = await readState();
   const profile = environmentState(state, envName).profiles.find(
@@ -577,31 +586,88 @@ async function reapplyAttributionIfActive(envName, attribution, previous) {
       sameBaseUrl(status.baseUrl, p.baseUrl),
   );
   if (!profile) return { applied: false };
-  const result = await applyClaudeAttribution({
+  const options = {
     attribution,
     previous,
     credentialHeader: claudeCredentialHeader(profile),
     environment: envName,
-  });
+  };
+  if (agentId === "codex") {
+    const result = await applyCodexAttribution(options);
+    return result.applied ? { applied: true, settingsFile: result.file } : { applied: false };
+  }
+  const result = await applyClaudeAttribution(options);
   return { applied: true, settingsFile: result.file };
 }
 
+function attributionAgentFlag(flags) {
+  const value = flags.agent;
+  if (value === undefined) return "claude-code";
+  if (value === true || !ATTRIBUTION_AGENTS[value]) {
+    throw new UserError(
+      `Cost attribution supports --agent ${ATTRIBUTION_AGENT_IDS.join(" or ")}${value === true ? "" : ` (got "${value}")`}.`,
+    );
+  }
+  return value;
+}
+
+/** Every agent's attribution for the JSON output; the top level stays one agent's. */
+function attributionByAgent(stored) {
+  return Object.fromEntries(
+    ATTRIBUTION_AGENT_IDS.map((id) => {
+      const info = describeAttribution(readAgentAttribution(stored, id), { agent: id });
+      return [
+        id,
+        {
+          enabled: info.attribution.enabled,
+          attribution: info.attribution,
+          preview: info.preview,
+          hintHeaders: info.hintHeaders,
+          tags: info.tags,
+          needsWrapper: info.needsWrapper,
+          wrapperFile: info.wrapperFile,
+          sourceLine: info.sourceLine,
+        },
+      ];
+    }),
+  );
+}
+
+function attributionJson(envName, info, stored, extra = {}) {
+  return {
+    ok: true,
+    environment: envName,
+    scmProviders: SCM_PROVIDERS,
+    ...info,
+    ...extra,
+    agents: attributionByAgent(stored),
+  };
+}
+
 function printAttribution(envName, info) {
+  const agent = ATTRIBUTION_AGENTS[info.agent];
   const a = info.attribution;
   const { autoSent, fromHeaders, additional } = info.tags;
   const out = (text = "") => process.stdout.write(`${text}\n`);
-  out(`Cost attribution for "${envName}": ${a.enabled ? "enabled" : "disabled"}`);
+  const title = agent.id === "claude-code" ? "Cost attribution" : `${agent.name} cost attribution`;
+  out(`${title} for "${envName}": ${a.enabled ? "enabled" : "disabled"}`);
 
-  out("\nSent by Claude Code automatically (Claude Code sends these itself):");
+  out(`\nSent by ${agent.name} automatically (${agent.name} sends these itself):`);
   const tagWidth = Math.max(...autoSent.map((t) => t.tag.length));
   for (const t of autoSent) {
     const note = t.needsHintHeaders ? (t.sent ? "via gateway hint headers" : "not sent: gateway hint headers off") : "";
     out(`  ${note ? t.tag.padEnd(tagWidth) : t.tag}${note ? `  ${note}` : ""}`);
   }
-  out(`  gateway hint headers: ${info.hintHeaders ? "on (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1)" : "off"}`);
+  if (agent.hintHeaders) {
+    out(`  gateway hint headers: ${info.hintHeaders ? "on (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1)" : "off"}`);
+  }
 
   if (!a.enabled) {
-    out('\nEnable the headers you add with: kong-ai-switch attribution set --scm-provider <p> --repository auto --branch auto');
+    out(
+      agent.id === "codex"
+        ? "\nEnable the headers you add with: kong-ai-switch attribution set --agent codex --project <p> --branch auto"
+        : "\nEnable the headers you add with: kong-ai-switch attribution set --scm-provider <p> --repository auto --branch auto",
+    );
     return;
   }
 
@@ -622,32 +688,61 @@ function printAttribution(envName, info) {
   }
 
   if (info.preview) {
-    out("\nHeader block (ANTHROPIC_CUSTOM_HEADERS):");
+    out(
+      agent.id === "codex"
+        ? "\nHeaders (~/.codex/config.toml [model_providers.kong] http_headers / env_http_headers):"
+        : "\nHeader block (ANTHROPIC_CUSTOM_HEADERS):",
+    );
     for (const line of info.preview.split("\n")) out(`  ${line}`);
   }
   if (info.needsWrapper) {
     process.stdout.write(
-      "\nRepository/branch come from git when Claude Code starts, which settings.json cannot do.\n" +
-        `A wrapper at ${info.wrapperFile} adds them (rewritten on each Claude Code switch).\n` +
-        "Add this line to ~/.zshrc (or ~/.bashrc), then open a new terminal:\n" +
-        `  ${info.sourceLine}\n`,
+      agent.id === "codex"
+        ? "\nBranch comes from git when Codex starts, which config.toml cannot do.\n" +
+            `config.toml maps ${CODEX_BRANCH_ENV} to the header (env_http_headers); a wrapper at\n` +
+            `${info.wrapperFile} sets it per launch (rewritten on each Codex switch).\n` +
+            "Add this line to ~/.zshrc (or ~/.bashrc), then open a new terminal:\n" +
+            `  ${info.sourceLine}\n`
+        : "\nRepository/branch come from git when Claude Code starts, which settings.json cannot do.\n" +
+            `A wrapper at ${info.wrapperFile} adds them (rewritten on each Claude Code switch).\n` +
+            "Add this line to ~/.zshrc (or ~/.bashrc), then open a new terminal:\n" +
+            `  ${info.sourceLine}\n`,
     );
   }
 }
 
 async function cmdAttributionShow(flags) {
+  const agentId = attributionAgentFlag(flags);
   const { env } = await activeEnvironment(flags);
-  const info = describeAttribution(readAttribution(env.attribution));
+  const info = describeAttribution(readAgentAttribution(env.attribution, agentId), { agent: agentId });
   if (flags.json) {
-    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...info });
+    emitJson(attributionJson(env.name, info, env.attribution));
     return;
   }
   printAttribution(env.name, info);
 }
 
 async function cmdAttributionSet(flags) {
+  const agentId = attributionAgentFlag(flags);
+  const agent = ATTRIBUTION_AGENTS[agentId];
+  if (agentId === "codex") {
+    const claudeOnly = [
+      ["scm-provider", "the source control provider"],
+      ["repository", "the repository"],
+    ].find(([flag]) => flags[flag] !== undefined);
+    if (claudeOnly) {
+      throw new UserError(
+        `Codex sends ${claudeOnly[1]} itself, so --${claudeOnly[0]} is not needed for Codex. ` +
+          "Set --project and --branch instead.",
+      );
+    }
+    if (flags["hint-headers"] !== undefined) {
+      throw new UserError("--hint-headers is a Claude Code setting; Codex sends the request kind and agent type itself.");
+    }
+  }
+
   const { config, env } = await activeEnvironment(flags);
-  const previous = readAttribution(env.attribution);
+  const previous = readAgentAttribution(env.attribution, agentId);
   const draft = { ...previous, headers: [...previous.headers] };
 
   const project = stringFlag(flags, "project");
@@ -688,41 +783,47 @@ async function cmdAttributionSet(flags) {
 
   let record;
   try {
-    record = normalizeAttribution(draft);
+    record = normalizeAttribution(draft, agentId);
   } catch (cause) {
     if (cause instanceof AttributionError) throw new UserError(cause.message);
     throw cause;
   }
 
-  await writeConfig(putAttribution(config, env.name, record));
-  const reapplied = await reapplyAttributionIfActive(env.name, record, previous);
-  const info = describeAttribution(record);
+  const stored = putAgentAttribution(env.attribution, agentId, record);
+  await writeConfig(putAttribution(config, env.name, stored));
+  const reapplied = await reapplyAttributionIfActive(env.name, agentId, record, previous);
+  const info = describeAttribution(record, { agent: agentId });
 
   if (flags.json) {
-    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...info, ...reapplied });
+    emitJson(attributionJson(env.name, info, stored, reapplied));
     return;
   }
   printAttribution(env.name, info);
   process.stdout.write(
     reapplied.applied
-      ? `\nUpdated ${reapplied.settingsFile}. Restart Claude Code for the change to take effect.\n`
-      : '\nSaved. Applied on the next "kong-ai-switch use <model> --agent claude-code".\n',
+      ? `\nUpdated ${reapplied.settingsFile}. Restart ${agent.name} for the change to take effect.\n`
+      : `\nSaved. Applied on the next "kong-ai-switch use <model> --agent ${agentId}".\n`,
   );
 }
 
 async function cmdAttributionClear(flags) {
+  const agentId = attributionAgentFlag(flags);
+  const agent = ATTRIBUTION_AGENTS[agentId];
   const { config, env } = await activeEnvironment(flags);
-  const previous = readAttribution(env.attribution);
-  await writeConfig(putAttribution(config, env.name, null));
-  const reapplied = await reapplyAttributionIfActive(env.name, null, previous);
+  const previous = readAgentAttribution(env.attribution, agentId);
+  const stored = putAgentAttribution(env.attribution, agentId, null);
+  await writeConfig(putAttribution(config, env.name, stored));
+  const reapplied = await reapplyAttributionIfActive(env.name, agentId, null, previous);
 
   if (flags.json) {
-    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...describeAttribution(readAttribution(null)), ...reapplied });
+    const info = describeAttribution(readAgentAttribution(null, agentId), { agent: agentId });
+    emitJson(attributionJson(env.name, info, stored, reapplied));
     return;
   }
-  process.stdout.write(`Removed cost attribution from "${env.name}".\n`);
+  const scope = agentId === "claude-code" ? "" : ` for ${agent.name}`;
+  process.stdout.write(`Removed cost attribution${scope} from "${env.name}".\n`);
   if (reapplied.applied) {
-    process.stdout.write(`Updated ${reapplied.settingsFile}. Restart Claude Code for the change to take effect.\n`);
+    process.stdout.write(`Updated ${reapplied.settingsFile}. Restart ${agent.name} for the change to take effect.\n`);
   }
 }
 
@@ -851,7 +952,7 @@ async function cmdEnvImport(positional, flags) {
     token: token && stored.inFile ? token : null,
   });
   if (incoming.attribution) {
-    next = putAttribution(next, incoming.name, readAttribution(incoming.attribution));
+    next = putAttribution(next, incoming.name, normalizeStoredAttribution(incoming.attribution));
   }
   await writeConfig(next);
 
@@ -1336,10 +1437,9 @@ async function cmdUse(positional, flags) {
               oidcAuthFlow: desktopWriter.oidcAuthFlow,
             }
           : {};
-      const attributionOpts =
-        agentId === "claude-code"
-          ? { attribution: env.attribution ?? null, environment: env.name }
-          : {};
+      const attributionOpts = ATTRIBUTION_AGENTS[agentId]
+        ? { attribution: readAgentAttribution(env.attribution, agentId), environment: env.name }
+        : {};
       applied.push(
         await applyToAgent(agentId, profileForAgent, {
           token,
@@ -1357,9 +1457,10 @@ async function cmdUse(positional, flags) {
   const result = applied.find((a) => a.agent === "claude-code") ?? applied[0];
   await writeState(putEnvironmentState(state, env.name, { ...entry, current: profile.id }));
 
-  const attributionInfo = applied.some((a) => a.agent === "claude-code")
-    ? describeAttribution(readAttribution(env.attribution))
-    : null;
+  const attributionInfos = ATTRIBUTION_AGENT_IDS.filter((id) => applied.some((a) => a.agent === id)).map(
+    (id) => describeAttribution(readAgentAttribution(env.attribution, id), { agent: id }),
+  );
+  const attributionInfo = attributionInfos[0] ?? null;
 
   if (flags.json) {
     emitJson({
@@ -1375,6 +1476,7 @@ async function cmdUse(positional, flags) {
       agents: applied,
       attribution: attributionInfo
         ? {
+            agent: attributionInfo.agent,
             enabled: attributionInfo.attribution.enabled,
             hintHeaders: attributionInfo.hintHeaders,
             preview: attributionInfo.preview,
@@ -1405,15 +1507,17 @@ async function cmdUse(positional, flags) {
       process.stdout.write(`  source it before launching Copilot:  source ${a.envFile} && copilot\n`);
     }
   }
-  if (attributionInfo?.attribution.enabled) {
-    const count = attributionInfo.headers.length + attributionInfo.dynamicHeaders.length;
+  for (const info of attributionInfos) {
+    if (!info.attribution.enabled) continue;
+    const count = info.headers.length + info.dynamicHeaders.length;
+    const label = info.agent === "claude-code" ? "Cost attribution" : `${ATTRIBUTION_AGENTS[info.agent].name} cost attribution`;
     process.stdout.write(
-      `Cost attribution: ${count} header(s)${attributionInfo.hintHeaders ? " + gateway hint headers" : ""} for "${env.name}".\n`,
+      `${label}: ${count} header(s)${info.hintHeaders ? " + gateway hint headers" : ""} for "${env.name}".\n`,
     );
-    if (attributionInfo.needsWrapper) {
+    if (info.needsWrapper) {
       process.stdout.write(
-        `Wrote ${attributionInfo.wrapperFile} (git-derived repository/branch).\n` +
-          `  add once to ~/.zshrc:  ${attributionInfo.sourceLine}\n`,
+        `Wrote ${info.wrapperFile} (git-derived ${info.agent === "codex" ? "branch" : "repository/branch"}).\n` +
+          `  add once to ~/.zshrc:  ${info.sourceLine}\n`,
       );
     }
   }

@@ -58,6 +58,8 @@ public struct AttributionSettings: Codable, Equatable, Sendable {
 public struct AttributionResult: Codable, Sendable {
     public let ok: Bool
     public let environment: String
+    /// Agent id the top-level fields describe; absent from pre-0.2.9 CLIs (Claude Code).
+    public let agent: String?
     public let attribution: AttributionSettings
     public let preview: String
     public let hintHeaders: Bool
@@ -65,42 +67,114 @@ public struct AttributionResult: Codable, Sendable {
     public let wrapperFile: String
     public let sourceLine: String?
     public let scmProviders: [String]?
-    /// `set`/`clear` only: whether Claude Code's settings were rewritten now.
+    /// `set`/`clear` only: whether the agent's config was rewritten now.
     public let applied: Bool?
 }
 
-/// A tag Kong AI cost management reports that Claude Code sends itself.
+/// A tag Kong AI cost management reports that the agent sends itself.
 public struct AutoSentTag: Hashable, Sendable {
     public let name: String
     /// Sent only with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
     public let needsHintHeaders: Bool
 }
 
+/// A reported tag that comes from a header you add.
+public enum AttributionField: String, CaseIterable, Sendable {
+    case scmProvider, repository, branch, project
+
+    public var tag: String {
+        switch self {
+        case .scmProvider: "Source control provider"
+        case .repository: "Repository"
+        case .branch: "Branch"
+        case .project: "Project"
+        }
+    }
+
+    public var header: String {
+        switch self {
+        case .scmProvider: Attribution.scmProviderHeader
+        case .repository: Attribution.repositoryHeader
+        case .branch: Attribution.branchHeader
+        case .project: Attribution.projectHeader
+        }
+    }
+}
+
+/// Agents with cost attribution. Mirrors `ATTRIBUTION_AGENTS` in `src/config/attribution.js`.
+public enum AttributionAgent: String, CaseIterable, Sendable {
+    case claudeCode = "claude-code"
+    case codex
+
+    public var name: String {
+        switch self {
+        case .claudeCode: "Claude Code"
+        case .codex: "Codex"
+        }
+    }
+
+    public var autoSentTags: [AutoSentTag] {
+        switch self {
+        case .claudeCode:
+            [
+                AutoSentTag(name: "Agent session", needsHintHeaders: false),
+                AutoSentTag(name: "Agent ID", needsHintHeaders: false),
+                AutoSentTag(name: "Parent agent", needsHintHeaders: false),
+                AutoSentTag(name: "Agent request kind", needsHintHeaders: true),
+                AutoSentTag(name: "Agent type", needsHintHeaders: true),
+            ]
+        case .codex:
+            [
+                "Agent session", "Agent request kind", "Repository", "Source control provider",
+                "Commit", "Agent ID", "Parent agent", "Agent type",
+            ].map { AutoSentTag(name: $0, needsHintHeaders: false) }
+        }
+    }
+
+    /// Reported tags that come from headers you add, in display order.
+    public var fields: [AttributionField] {
+        switch self {
+        case .claudeCode: [.scmProvider, .repository, .branch]
+        case .codex: [.branch, .project]
+        }
+    }
+
+    /// Fields sent as headers beyond the reported tags.
+    public var additionalFields: [AttributionField] {
+        switch self {
+        case .claudeCode: [.project]
+        case .codex: []
+        }
+    }
+
+    public var supportsHintHeaders: Bool { self == .claudeCode }
+
+    public var ownedFields: Set<AttributionField> { Set(fields + additionalFields) }
+
+    /// Same guarded line the CLI prints; the wrapper path is fixed per agent.
+    public var sourceLine: String {
+        let file = "$HOME/.kong-ai-switch/\(self == .codex ? "codex" : "claude")-attribution.sh"
+        return #"[ -f "\#(file)" ] && source "\#(file)""#
+    }
+}
+
 public enum Attribution {
-    /// Mirrors `AUTO_SENT_TAGS` in `src/config/attribution.js`.
-    public static let autoSentTags: [AutoSentTag] = [
-        AutoSentTag(name: "Agent session", needsHintHeaders: false),
-        AutoSentTag(name: "Agent ID", needsHintHeaders: false),
-        AutoSentTag(name: "Parent agent", needsHintHeaders: false),
-        AutoSentTag(name: "Agent request kind", needsHintHeaders: true),
-        AutoSentTag(name: "Agent type", needsHintHeaders: true),
-    ]
+    /// Claude Code's auto-sent tags; see `AttributionAgent.autoSentTags`.
+    public static let autoSentTags = AttributionAgent.claudeCode.autoSentTags
 
     public static let projectHeader = "ai-cost-project"
     public static let scmProviderHeader = "ai-cost-scm-provider"
     public static let repositoryHeader = "ai-cost-scm-repository"
     public static let branchHeader = "ai-cost-scm-branch"
 
+    /// Env var Codex's `env_http_headers` maps to the branch header.
+    public static let codexBranchEnv = "KONG_AI_SCM_BRANCH"
+
     public static let scmProviders = ["github", "gitlab", "bitbucket", "azure-devops", "other"]
 
-    /// Same guarded line the CLI prints; the wrapper path is fixed.
-    public static let sourceLine =
-        #"[ -f "$HOME/.kong-ai-switch/claude-attribution.sh" ] && source "$HOME/.kong-ai-switch/claude-attribution.sh""#
+    public static let sourceLine = AttributionAgent.claudeCode.sourceLine
 
     private static let reservedNames: Set<String> = ["authorization", "apikey", "x-api-key"]
-    private static let knownNames: Set<String> = [
-        projectHeader, scmProviderHeader, repositoryHeader, branchHeader,
-    ]
 
     private static func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespaces)
@@ -119,8 +193,24 @@ public enum Attribution {
         !value.trimmingCharacters(in: .whitespacesAndNewlines).contains(where: \.isNewline)
     }
 
+    /// The record as the CLI will store it: fields the agent sends itself dropped.
+    public static func forAgent(_ settings: AttributionSettings, _ agent: AttributionAgent) -> AttributionSettings {
+        var out = settings
+        let owned = agent.ownedFields
+        if !owned.contains(.scmProvider) { out.scmProvider = "" }
+        if !owned.contains(.repository) {
+            out.repository = ""
+            out.repositoryAuto = false
+        }
+        if !agent.supportsHintHeaders { out.hintHeaders = false }
+        return out
+    }
+
     /// First problem that would make the CLI refuse this record, or nil.
-    public static func validationError(_ settings: AttributionSettings) -> String? {
+    public static func validationError(
+        _ settings: AttributionSettings, agent: AttributionAgent = .claudeCode
+    ) -> String? {
+        let settings = forAgent(settings, agent)
         let fields: [(String, String)] = [
             ("Project", settings.project),
             ("SCM provider", settings.scmProvider),
@@ -141,8 +231,10 @@ public enum Attribution {
             if reservedNames.contains(lower) {
                 return "\"\(name)\" carries the gateway credential and cannot be an attribution header."
             }
-            if knownNames.contains(lower) {
-                return "\"\(name)\" has its own field above."
+            if let field = AttributionField.allCases.first(where: { $0.header == lower }) {
+                return agent.ownedFields.contains(field)
+                    ? "\"\(name)\" has its own field above."
+                    : "\"\(name)\" is not needed: \(agent.name) sends the \(field.tag.lowercased()) itself."
             }
             if seen.contains(lower) { return "\"\(name)\" is listed twice." }
             seen.insert(lower)
@@ -151,8 +243,9 @@ public enum Attribution {
         return nil
     }
 
-    /// Header block as Claude Code will send it; git-derived values shown as `$(…)`.
-    public static func preview(_ settings: AttributionSettings) -> String {
+    /// Headers as the agent will send them; git-derived values shown as `$(…)`.
+    public static func preview(_ settings: AttributionSettings, agent: AttributionAgent = .claudeCode) -> String {
+        let settings = forAgent(settings, agent)
         guard settings.enabled else { return "" }
         var lines: [String] = []
         func add(_ name: String, _ value: String) {
@@ -175,18 +268,25 @@ public enum Attribution {
         return lines.joined(separator: "\n")
     }
 
-    /// Arguments for `attribution set`, replacing the whole record.
+    /// Arguments for `attribution set`, replacing the agent's whole record.
     ///
     /// `--flag=value` keeps empty values and values starting with `--` intact.
-    public static func setArguments(environment: String?, settings: AttributionSettings) -> [String] {
-        var args = ["attribution", "set"]
+    /// Codex refuses the Claude Code-only flags, so they are left out for it.
+    public static func setArguments(
+        environment: String?, settings: AttributionSettings, agent: AttributionAgent = .claudeCode
+    ) -> [String] {
+        var args = ["attribution", "set", "--agent", agent.rawValue]
         if let environment { args += ["--env", environment] }
+        args.append("--enabled=\(settings.enabled)")
+        if agent.supportsHintHeaders { args.append("--hint-headers=\(settings.hintHeaders)") }
+        args.append("--project=\(trimmed(settings.project))")
+        if agent.ownedFields.contains(.scmProvider) {
+            args.append("--scm-provider=\(trimmed(settings.scmProvider))")
+        }
+        if agent.ownedFields.contains(.repository) {
+            args.append("--repository=\(settings.repositoryAuto ? "auto" : trimmed(settings.repository))")
+        }
         args += [
-            "--enabled=\(settings.enabled)",
-            "--hint-headers=\(settings.hintHeaders)",
-            "--project=\(trimmed(settings.project))",
-            "--scm-provider=\(trimmed(settings.scmProvider))",
-            "--repository=\(settings.repositoryAuto ? "auto" : trimmed(settings.repository))",
             "--branch=\(settings.branchAuto ? "auto" : trimmed(settings.branch))",
             "--clear-headers",
         ]

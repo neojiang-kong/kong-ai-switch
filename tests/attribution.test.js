@@ -469,7 +469,7 @@ test("attribution set/show/clear round-trip through the CLI per environment", as
   assert.deepEqual(set.json.attribution.headers.map((h) => h.name), ["ai-cost-team", "x-cost-center"]);
 
   const config = JSON.parse(await readFile(path.join(home, ".kong-ai-switch", "config.json"), "utf8"));
-  assert.equal(config.environments.acme.attribution.project, "payments-api");
+  assert.equal(config.environments.acme.attribution.claudeCode.project, "payments-api");
 
   const removed = cli(home, ["attribution", "set", "--remove-header", "x-cost-center", "--hint-headers", "false", "--json"]);
   assert.deepEqual(removed.json.attribution.headers.map((h) => h.name), ["ai-cost-team"]);

@@ -16,11 +16,16 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { authWithKind } from "../kong/auth.js";
 import {
+  ATTRIBUTION_HEADERS,
+  CODEX_BRANCH_ENV,
   applyAttributionToEnv,
   attributionWrapperPath,
   buildAttributionWrapper,
+  buildCodexAttributionWrapper,
   buildInactiveWrapper,
+  managedHeaderNames,
   readAttribution,
+  staticAttributionHeaders,
   usesAutoGit,
 } from "./attribution.js";
 
@@ -577,10 +582,17 @@ export function claudeCredentialHeader(profile) {
  * Only creates a file when one is needed; an existing file is replaced with an
  * inert stub so a `source` line in the user's rc file keeps working.
  */
-async function writeAttributionWrapper(attribution, { home, staticBlock, environment }) {
-  const file = attributionWrapperPath(home);
+async function writeAttributionWrapper(
+  attribution,
+  { home, staticBlock, environment, agentId = "claude-code" },
+) {
+  const file = attributionWrapperPath(home, agentId);
   if (usesAutoGit(attribution)) {
-    await writeAtomic(file, buildAttributionWrapper(attribution, { staticBlock, environment, home }));
+    const body =
+      agentId === "codex"
+        ? buildCodexAttributionWrapper(attribution, { environment, home })
+        : buildAttributionWrapper(attribution, { staticBlock, environment, home });
+    await writeAtomic(file, body);
     return { file, active: true };
   }
   try {
@@ -588,7 +600,7 @@ async function writeAttributionWrapper(attribution, { home, staticBlock, environ
   } catch {
     return { file, active: false };
   }
-  await writeAtomic(file, buildInactiveWrapper());
+  await writeAtomic(file, buildInactiveWrapper(agentId));
   return { file, active: false };
 }
 
@@ -625,13 +637,229 @@ export async function applyClaudeAttribution({
   return { file, wrapperFile: wrapper.file, wrapperActive: wrapper.active };
 }
 
+/**
+ * Re-apply attribution to Codex's managed provider block without switching
+ * model. Returns `{ applied: false }` when Codex has no managed provider.
+ */
+export async function applyCodexAttribution({
+  attribution,
+  previous,
+  credentialHeader,
+  environment,
+  home = homedir(),
+} = {}) {
+  const file = getAgent("codex").configPath(home);
+  let text;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    return { applied: false, file };
+  }
+  const record = readAttribution(attribution, "codex");
+  const next = applyCodexAttributionToToml(text, record, {
+    credentialHeader,
+    previous: previous ? readAttribution(previous, "codex") : undefined,
+  });
+  if (next === null) return { applied: false, file };
+  await writeAtomic(file, next);
+  const wrapper = await writeAttributionWrapper(record, { home, environment, agentId: "codex" });
+  return { applied: true, file, wrapperFile: wrapper.file, wrapperActive: wrapper.active };
+}
+
 // ---------------------------------------------------------------------------
 // Codex TOML
 // ---------------------------------------------------------------------------
 
 /** Quote a TOML string, escaping what the format requires. */
 function tomlString(value) {
-  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `"${String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/[\u0000-\u001f\u007f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}"`;
+}
+
+/** A TOML key: bare when it can be, quoted otherwise (a `.` would nest). */
+function tomlKey(name) {
+  return /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlString(name);
+}
+
+/**
+ * Single-line inline table. Codex's header maps are always written inline:
+ * a `[model_providers.kong.http_headers]` table would stay open and swallow
+ * any bare keys that follow it.
+ */
+function tomlInlineTable(entries) {
+  if (entries.length === 0) return "{}";
+  return `{ ${entries.map(({ name, value }) => `${tomlKey(name)} = ${tomlString(value)}`).join(", ")} }`;
+}
+
+/**
+ * Parse a one-line TOML inline table of string values, e.g.
+ * `{ apikey = "k", "x.y" = 'v' }`, into `[{ name, value }]` in order.
+ * Throws on anything else (dotted keys, nested tables, non-strings).
+ */
+export function parseTomlInlineStringTable(source) {
+  const s = String(source ?? "").trim();
+  let i = 0;
+  const fail = () => {
+    throw new Error(`Unsupported TOML inline table: ${s}`);
+  };
+  const skipSpace = () => {
+    while (i < s.length && (s[i] === " " || s[i] === "\t")) i += 1;
+  };
+  const escapes = { '"': '"', "\\": "\\", n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
+  const readString = () => {
+    const quote = s[i];
+    if (quote === "'") {
+      const end = s.indexOf("'", i + 1);
+      if (end === -1) fail();
+      const value = s.slice(i + 1, end);
+      i = end + 1;
+      return value;
+    }
+    if (quote !== '"') fail();
+    i += 1;
+    let out = "";
+    while (i < s.length && s[i] !== '"') {
+      if (s[i] !== "\\") {
+        out += s[i];
+        i += 1;
+        continue;
+      }
+      const code = s[i + 1];
+      if (code === "u" || code === "U") {
+        const len = code === "u" ? 4 : 8;
+        const hex = s.slice(i + 2, i + 2 + len);
+        if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length !== len) fail();
+        out += String.fromCodePoint(parseInt(hex, 16));
+        i += 2 + len;
+        continue;
+      }
+      if (!(code in escapes)) fail();
+      out += escapes[code];
+      i += 2;
+    }
+    if (s[i] !== '"') fail();
+    i += 1;
+    return out;
+  };
+  const readKey = () => {
+    if (s[i] === '"' || s[i] === "'") return readString();
+    const bare = /^[A-Za-z0-9_-]+/.exec(s.slice(i));
+    if (!bare) fail();
+    i += bare[0].length;
+    return bare[0];
+  };
+
+  if (s[i] !== "{") fail();
+  i += 1;
+  const out = [];
+  skipSpace();
+  if (s[i] === "}") {
+    i += 1;
+  } else {
+    for (;;) {
+      skipSpace();
+      const name = readKey();
+      skipSpace();
+      if (s[i] !== "=") fail();
+      i += 1;
+      skipSpace();
+      out.push({ name, value: readString() });
+      skipSpace();
+      if (s[i] === ",") {
+        i += 1;
+        continue;
+      }
+      if (s[i] === "}") {
+        i += 1;
+        break;
+      }
+      fail();
+    }
+  }
+  skipSpace();
+  if (i < s.length && s[i] !== "#") fail();
+  return out;
+}
+
+/** Comment inside the managed provider block naming the headers attribution owns. */
+const CODEX_ATTRIBUTION_MARK = "# kong-ai-switch attribution headers:";
+
+/**
+ * Merge attribution into the managed `[model_providers.kong]` block.
+ *
+ * `http_headers` keeps every entry attribution does not own (the key-auth
+ * credential, chiefly) first, then the static attribution headers.
+ * `env_http_headers` is owned outright: it carries the git branch when
+ * branch is "auto". Returns null when the file has no managed provider block.
+ */
+export function applyCodexAttributionToToml(text, attribution, { previous, credentialHeader } = {}) {
+  const beginAt = text.indexOf(CODEX_PROVIDER_BEGIN);
+  const endAt = text.indexOf(CODEX_PROVIDER_END);
+  if (beginAt === -1 || endAt === -1 || endAt < beginAt) return null;
+
+  const lines = text.slice(beginAt, endAt).split("\n");
+  while (lines.length && lines.at(-1).trim() === "") lines.pop();
+
+  let existing = [];
+  let marked = [];
+  const kept = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^http_headers\s*=/.test(trimmed)) {
+      existing = parseTomlInlineStringTable(trimmed.replace(/^http_headers\s*=\s*/, ""));
+    } else if (/^env_http_headers\s*=/.test(trimmed)) {
+      // Owned outright; regenerated below.
+    } else if (trimmed.startsWith(CODEX_ATTRIBUTION_MARK)) {
+      marked = trimmed
+        .slice(CODEX_ATTRIBUTION_MARK.length)
+        .split(",")
+        .map((n) => n.trim().toLowerCase())
+        .filter(Boolean);
+    } else {
+      kept.push(line);
+    }
+  }
+
+  const managed = managedHeaderNames(attribution, previous);
+  for (const name of marked) managed.add(name);
+  if (credentialHeader) managed.delete(String(credentialHeader).toLowerCase());
+
+  const credential = existing.filter((h) => !managed.has(h.name.toLowerCase()));
+  const keptNames = new Set(credential.map((h) => h.name.toLowerCase()));
+  const added = staticAttributionHeaders(attribution).filter((h) => !keptNames.has(h.name.toLowerCase()));
+  const envHeaders =
+    attribution?.enabled && attribution.branchAuto
+      ? [{ name: ATTRIBUTION_HEADERS.branch, value: CODEX_BRANCH_ENV }]
+      : [];
+
+  if (added.length || envHeaders.length) {
+    kept.push(`${CODEX_ATTRIBUTION_MARK} ${[...added, ...envHeaders].map((h) => h.name).join(", ")}`);
+  }
+  const headers = [...credential, ...added];
+  if (headers.length) kept.push(`http_headers = ${tomlInlineTable(headers)}`);
+  if (envHeaders.length) kept.push(`env_http_headers = ${tomlInlineTable(envHeaders)}`);
+
+  return `${text.slice(0, beginAt)}${kept.join("\n")}\n${text.slice(endAt)}`;
+}
+
+/** Whether the managed provider block carries a gateway credential. */
+function codexHasCredential(scope) {
+  if (/^\s*experimental_bearer_token\s*=/m.test(scope)) return true;
+  const line = scope.match(/^\s*http_headers\s*=\s*(.*)$/m)?.[1];
+  if (!line) return false;
+  const marked = new Set(
+    (scope.match(new RegExp(`^\\s*${CODEX_ATTRIBUTION_MARK}(.*)$`, "m"))?.[1] ?? "")
+      .split(",")
+      .map((n) => n.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  try {
+    return parseTomlInlineStringTable(line).some((h) => !marked.has(h.name.toLowerCase()));
+  } catch {
+    return true;
+  }
 }
 
 /** Markers for the root keys we own (must sit before any `[table]`). */
@@ -697,7 +925,7 @@ function managedCodexScope(text) {
  * Credentials live in the provider block so launching `codex` needs no shell
  * export. Key-auth: apikey in http_headers only. OIDC: experimental_bearer_token.
  */
-function applyCodexToml(existing, profile, { token }) {
+function applyCodexToml(existing, profile, { token, attribution }) {
   const authLines = codexAuthLines(profile, token);
 
   const rootBlock = [
@@ -725,8 +953,9 @@ function applyCodexToml(existing, profile, { token }) {
 
   let rest = stripCodexManaged(existing ?? "");
   rest = scrubCompetingCodexProviders(rest, profile.baseUrl).trim();
-  if (rest === "") return `${rootBlock}\n\n${providerBlock}\n`;
-  return `${rootBlock}\n\n${rest}\n\n${providerBlock}\n`;
+  const text = rest === "" ? `${rootBlock}\n\n${providerBlock}\n` : `${rootBlock}\n\n${rest}\n\n${providerBlock}\n`;
+  if (!attribution?.enabled) return text;
+  return applyCodexAttributionToToml(text, attribution, { credentialHeader: claudeCredentialHeader(profile) });
 }
 
 /**
@@ -795,7 +1024,7 @@ function codexAuthLines(profile, token) {
     // `[model_providers.kong.http_headers]` would swallow following bare keys.
     // Do NOT send a placeholder Bearer: dual-auth gateways (OIDC + key-auth)
     // 401 on a junk Authorization header before key-auth runs.
-    return [`http_headers = { ${header} = ${tomlString(token)} }`];
+    return [`http_headers = ${tomlInlineTable([{ name: header, value: token }])}`];
   }
 
   // OIDC / bearer-style strategies. Stored in config so the app switch is enough.
@@ -920,8 +1149,19 @@ export async function applyToAgent(
       if (cause?.code !== "ENOENT") throw new Error(`Could not read ${file}: ${cause.message}`);
       existed = false;
     }
-    await writeAtomic(file, applyCodexToml(existing, effective, { token }));
-    return { agent: agent.id, file, created: !existed };
+    const record = readAttribution(attribution, "codex");
+    await writeAtomic(file, applyCodexToml(existing, effective, { token, attribution: record }));
+    const wrapper = await writeAttributionWrapper(record, { home, environment, agentId: "codex" });
+    return {
+      agent: agent.id,
+      file,
+      created: !existed,
+      attribution: {
+        enabled: record.enabled,
+        wrapperFile: wrapper.file,
+        wrapperActive: wrapper.active,
+      },
+    };
   }
 
   if (agent.kind === "copilot") {
@@ -994,7 +1234,7 @@ export async function agentStatus(agentId, { home = homedir() } = {}) {
       configured,
       baseUrl,
       model,
-      hasToken: /experimental_bearer_token|http_headers|env_key/.test(scope),
+      hasToken: codexHasCredential(scope) || /^\s*env_key\s*=/m.test(scope),
     };
   }
 

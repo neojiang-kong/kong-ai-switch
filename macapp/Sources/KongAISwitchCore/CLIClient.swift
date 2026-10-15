@@ -352,25 +352,29 @@ public struct KongCLI: Sendable {
         return try run(args, as: SwitchResult.self)
     }
 
-    /// Cost-attribution headers stored for one environment.
-    public func showAttribution(environment: String?) throws -> AttributionResult {
-        var args = ["attribution", "show"]
+    /// Cost-attribution headers stored for one environment and agent.
+    public func showAttribution(
+        environment: String?, agent: AttributionAgent = .claudeCode
+    ) throws -> AttributionResult {
+        var args = ["attribution", "show", "--agent", agent.rawValue]
         if let environment { args += ["--env", environment] }
         return try run(args, as: AttributionResult.self)
     }
 
-    /// Replace an environment's attribution. The CLI also rewrites Claude
-    /// Code's settings right away when it already points at this environment.
-    public func setAttribution(environment: String?, settings: AttributionSettings) throws
-        -> AttributionResult
-    {
+    /// Replace one agent's attribution. The CLI also rewrites that agent's
+    /// config right away when it already points at this environment.
+    public func setAttribution(
+        environment: String?, settings: AttributionSettings, agent: AttributionAgent = .claudeCode
+    ) throws -> AttributionResult {
         try run(
-            Attribution.setArguments(environment: environment, settings: settings),
+            Attribution.setArguments(environment: environment, settings: settings, agent: agent),
             as: AttributionResult.self)
     }
 
-    public func clearAttribution(environment: String?) throws -> AttributionResult {
-        var args = ["attribution", "clear"]
+    public func clearAttribution(
+        environment: String?, agent: AttributionAgent = .claudeCode
+    ) throws -> AttributionResult {
+        var args = ["attribution", "clear", "--agent", agent.rawValue]
         if let environment { args += ["--env", environment] }
         return try run(args, as: AttributionResult.self)
     }

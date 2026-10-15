@@ -1,21 +1,23 @@
 import Foundation
 import KongAISwitchCore
 
-/// Editable copy of one environment's cost attribution.
+/// Editable copy of one environment's cost attribution for one agent.
 ///
 /// Unlike `DesktopWriterPrefs` this is not kept in UserDefaults: the CLI owns
-/// it (per environment, in `~/.kong-ai-switch/config.json`) so a plain
-/// `kong-ai-switch use` applies the same headers the app shows.
+/// it (per environment and agent, in `~/.kong-ai-switch/config.json`) so a
+/// plain `kong-ai-switch use` applies the same headers the app shows.
 struct AttributionDraft: Equatable {
     /// Picker tag for a provider outside the known list.
     static let customProvider = "__custom__"
 
+    var agent: AttributionAgent
     var settings: AttributionSettings
     /// "", a known provider, or `customProvider`.
     var scmChoice: String
     var scmCustom: String
 
-    init(settings: AttributionSettings = .empty) {
+    init(settings: AttributionSettings = .empty, agent: AttributionAgent = .claudeCode) {
+        self.agent = agent
         self.settings = settings
         let provider = settings.scmProvider
         if provider.isEmpty || Attribution.scmProviders.contains(provider) {
@@ -35,10 +37,10 @@ struct AttributionDraft: Equatable {
             !$0.name.trimmingCharacters(in: .whitespaces).isEmpty
                 || !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
         }
-        return out
+        return Attribution.forAgent(out, agent)
     }
 
-    var preview: String { Attribution.preview(resolved) }
+    var preview: String { Attribution.preview(resolved, agent: agent) }
 
-    var validationError: String? { Attribution.validationError(resolved) }
+    var validationError: String? { Attribution.validationError(resolved, agent: agent) }
 }

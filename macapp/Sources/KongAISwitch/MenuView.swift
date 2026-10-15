@@ -580,10 +580,10 @@ struct MenuView: View {
                     Button("Desktop…") { state.beginDesktopSettings() }
                         .disabled(state.busy != nil)
                 }
-                if state.selectedAgentId == "claude-code" {
+                if let agent = state.selectedAttributionAgent {
                     Button("Attribution…") { state.beginAttributionSettings() }
                         .disabled(state.busy != nil || state.environments.isEmpty)
-                        .help("Cost-attribution headers Claude Code sends for this environment")
+                        .help("Cost-attribution headers \(agent.name) sends for this environment")
                 }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
