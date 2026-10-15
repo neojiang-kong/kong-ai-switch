@@ -334,6 +334,82 @@ do {
     check("threw the wrong error type: \(error)", false)
 }
 
+// MARK: - Attribution
+
+section("Cost attribution")
+
+final class RecordingRunner: CommandRunner, @unchecked Sendable {
+    let stdout: String
+    var arguments: [String] = []
+    init(stdout: String) { self.stdout = stdout }
+    func run(executable: URL, arguments: [String], environment: [String: String]) throws
+        -> (status: Int32, stdout: Data, stderr: Data)
+    {
+        self.arguments = arguments
+        return (0, Data(stdout.utf8), Data())
+    }
+}
+
+let attributionJSON = """
+{"ok":true,"environment":"acme","scmProviders":["github","gitlab","bitbucket","azure-devops","other"],
+ "attribution":{"enabled":true,"hintHeaders":true,"project":"payments-api","scmProvider":"github",
+   "repository":"","repositoryAuto":true,"branch":"","branchAuto":true,
+   "headers":[{"name":"ai-cost-team","value":"platform"}]},
+ "headers":[{"name":"ai-cost-project","value":"payments-api"}],"dynamicHeaders":[],
+ "preview":"ai-cost-project: payments-api","hintHeaders":true,"needsWrapper":true,
+ "wrapperFile":"/Users/x/.kong-ai-switch/claude-attribution.sh",
+ "sourceLine":"[ -f x ] && source x","applied":false}
+"""
+
+do {
+    let runner = RecordingRunner(stdout: attributionJSON)
+    let result = try makeCLI(runner).showAttribution(environment: "acme")
+    checkEqual("attribution decodes the environment", result.environment, "acme")
+    checkEqual("attribution decodes auto repository", result.attribution.repositoryAuto, true)
+    checkEqual("attribution decodes extra headers", result.attribution.headers.map(\.name), ["ai-cost-team"])
+    checkEqual("attribution reports the wrapper", result.needsWrapper, true)
+    checkEqual("show passes --env", Array(runner.arguments.dropFirst().prefix(4)), ["attribution", "show", "--env", "acme"])
+} catch {
+    check("attribution decoding threw: \(error)", false)
+}
+
+let attributionSample = AttributionSettings(
+    enabled: true, hintHeaders: false, project: " payments-api ", scmProvider: "github",
+    repository: "", repositoryAuto: true, branch: "main", branchAuto: false,
+    headers: [AttributionHeader(name: "x-cost-center", value: "--42"), AttributionHeader(name: " ", value: "")]
+)
+checkEqual(
+    "set arguments replace the whole record with --flag=value",
+    Attribution.setArguments(environment: "acme", settings: attributionSample),
+    [
+        "attribution", "set", "--env", "acme", "--enabled=true", "--hint-headers=false",
+        "--project=payments-api", "--scm-provider=github", "--repository=auto", "--branch=main",
+        "--clear-headers", "--header=x-cost-center: --42",
+    ]
+)
+checkEqual(
+    "preview lists static then git-derived headers",
+    Attribution.preview(attributionSample),
+    "ai-cost-project: payments-api\nai-cost-scm-provider: github\nai-cost-scm-branch: main\n"
+        + "x-cost-center: --42\nai-cost-scm-repository: $(git remote get-url origin)"
+)
+checkEqual("preview is empty when disabled", Attribution.preview(AttributionSettings(project: "p")), "")
+check("valid record passes validation", Attribution.validationError(attributionSample) == nil)
+check(
+    "header names must be HTTP tokens",
+    Attribution.validationError(AttributionSettings(headers: [AttributionHeader(name: "bad name", value: "x")])) != nil
+)
+check(
+    "credential header names are refused",
+    Attribution.validationError(AttributionSettings(headers: [AttributionHeader(name: "apikey", value: "x")]))?
+        .contains("credential") == true
+)
+check(
+    "multi-line values are refused",
+    Attribution.validationError(AttributionSettings(project: "a\nb")) != nil
+)
+check("auto git is detected", attributionSample.usesAutoGit)
+
 // MARK: - Regions
 
 section("Regions")

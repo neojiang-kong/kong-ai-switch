@@ -26,6 +26,7 @@ import {
   writeConfig,
   putEnvironment,
   removeEnvironment,
+  putAttribution,
   setActive,
   listEnvironments,
   resolveEnvironment,
@@ -51,7 +52,18 @@ import {
   applyToAgent,
   agentStatus,
   agentsForModel,
+  applyClaudeAttribution,
+  claudeCredentialHeader,
 } from "../config/agents.js";
+import {
+  AttributionError,
+  SCM_PROVIDERS,
+  describeAttribution,
+  normalizeAttribution,
+  parseHeaderLine,
+  readAttribution,
+  validateHeaderName,
+} from "../config/attribution.js";
 
 const USAGE = `kong-ai-switch — switch Claude Code between Kong AI Gateway models
 
@@ -85,6 +97,19 @@ Models:
   kong-ai-switch agents                                 which agents, and where they point
   kong-ai-switch status
 
+Cost attribution (Claude Code, stored per environment):
+  kong-ai-switch attribution set [--env <name>] [--project <p>]
+                       [--scm-provider github|gitlab|bitbucket|azure-devops|other]
+                       [--repository <owner/repo>|auto] [--branch <name>|auto]
+                       [--header 'Name: value']... [--remove-header <Name>]...
+                       [--clear-headers] [--hint-headers true|false]
+                       [--enabled true|false]
+  kong-ai-switch attribution show [--env <name>] [--json]
+  kong-ai-switch attribution clear [--env <name>]
+  Applied by "use --agent claude-code" (and immediately when Claude Code already
+  points at this environment). "auto" reads git at launch via a shell wrapper:
+  add the printed source line to ~/.zshrc.
+
 Every model command takes --env to act on one environment without changing
 the active one.
 
@@ -100,18 +125,31 @@ Auth kinds for --auth: key-auth, openid-connect
 Regions: ${Object.keys(KONNECT_REGIONS).join(", ")}, or a full control plane URL
 `;
 
+/** Flags that may be given more than once; they collect into an array. */
+const REPEATABLE_FLAGS = new Set(["header", "remove-header"]);
+
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   const flags = {};
   const positional = [];
+  const setFlag = (key, value) => {
+    if (REPEATABLE_FLAGS.has(key)) (flags[key] ??= []).push(value);
+    else flags[key] = value;
+  };
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg.startsWith("--")) {
+      // `--key=value` lets a value start with "--" or be empty unambiguously.
+      const eq = arg.indexOf("=");
+      if (eq > 2) {
+        setFlag(arg.slice(2, eq), arg.slice(eq + 1));
+        continue;
+      }
       const key = arg.slice(2);
       const next = rest[i + 1];
-      if (next === undefined || next.startsWith("--")) flags[key] = true;
+      if (next === undefined || next.startsWith("--")) setFlag(key, true);
       else {
-        flags[key] = next;
+        setFlag(key, next);
         i += 1;
       }
     } else positional.push(arg);
@@ -505,6 +543,180 @@ async function cmdCredential(positional, flags) {
   }
 }
 
+function parseBoolFlag(flags, name) {
+  const v = flags[name];
+  if (v === undefined || v === null) return undefined;
+  if (v === true || v === "true" || v === "1" || v === "on") return true;
+  if (v === false || v === "false" || v === "0" || v === "off") return false;
+  throw new UserError(`--${name} expects true or false (got "${v}").`);
+}
+
+function stringFlag(flags, name) {
+  const v = flags[name];
+  if (v === undefined) return undefined;
+  if (v === true) throw new UserError(`--${name} needs a value (use --${name}="" to clear it).`);
+  return String(v);
+}
+
+function sameBaseUrl(a, b) {
+  const norm = (u) => String(u ?? "").replace(/\/+$/, "");
+  return norm(a) === norm(b);
+}
+
+/**
+ * When Claude Code already points at a model from this environment, rewrite
+ * its headers now so a change takes effect without another switch.
+ */
+async function reapplyAttributionIfActive(envName, attribution, previous) {
+  const status = await agentStatus("claude-code").catch(() => null);
+  if (!status?.configured) return { applied: false };
+  const state = await readState();
+  const profile = environmentState(state, envName).profiles.find(
+    (p) =>
+      (status.model === p.clientModelId || status.model === p.name) &&
+      sameBaseUrl(status.baseUrl, p.baseUrl),
+  );
+  if (!profile) return { applied: false };
+  const result = await applyClaudeAttribution({
+    attribution,
+    previous,
+    credentialHeader: claudeCredentialHeader(profile),
+    environment: envName,
+  });
+  return { applied: true, settingsFile: result.file };
+}
+
+function printAttribution(envName, info) {
+  const a = info.attribution;
+  process.stdout.write(`Cost attribution for "${envName}": ${a.enabled ? "enabled" : "disabled"}\n`);
+  if (!a.enabled) {
+    process.stdout.write('  Enable with: kong-ai-switch attribution set --project <name>\n');
+    return;
+  }
+  process.stdout.write(`  gateway hint headers  ${info.hintHeaders ? "on (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1)" : "off"}\n`);
+  if (info.preview) {
+    process.stdout.write("  headers:\n");
+    for (const line of info.preview.split("\n")) process.stdout.write(`    ${line}\n`);
+  } else {
+    process.stdout.write("  headers: (none set)\n");
+  }
+  if (info.needsWrapper) {
+    process.stdout.write(
+      "\nRepository/branch come from git when Claude Code starts, which settings.json cannot do.\n" +
+        `A wrapper at ${info.wrapperFile} adds them (rewritten on each Claude Code switch).\n` +
+        "Add this line to ~/.zshrc (or ~/.bashrc), then open a new terminal:\n" +
+        `  ${info.sourceLine}\n`,
+    );
+  }
+}
+
+async function cmdAttributionShow(flags) {
+  const { env } = await activeEnvironment(flags);
+  const info = describeAttribution(readAttribution(env.attribution));
+  if (flags.json) {
+    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...info });
+    return;
+  }
+  printAttribution(env.name, info);
+}
+
+async function cmdAttributionSet(flags) {
+  const { config, env } = await activeEnvironment(flags);
+  const previous = readAttribution(env.attribution);
+  const draft = { ...previous, headers: [...previous.headers] };
+
+  const project = stringFlag(flags, "project");
+  if (project !== undefined) draft.project = project;
+  const provider = stringFlag(flags, "scm-provider");
+  if (provider !== undefined) draft.scmProvider = provider;
+  const repository = stringFlag(flags, "repository");
+  if (repository !== undefined) {
+    draft.repositoryAuto = repository.trim().toLowerCase() === "auto";
+    draft.repository = draft.repositoryAuto ? "" : repository;
+  }
+  const branch = stringFlag(flags, "branch");
+  if (branch !== undefined) {
+    draft.branchAuto = branch.trim().toLowerCase() === "auto";
+    draft.branch = draft.branchAuto ? "" : branch;
+  }
+
+  try {
+    if (flags["clear-headers"]) draft.headers = [];
+    for (const name of flags["remove-header"] ?? []) {
+      const lower = validateHeaderName(name).toLowerCase();
+      draft.headers = draft.headers.filter((h) => h.name.toLowerCase() !== lower);
+    }
+    for (const line of flags.header ?? []) {
+      if (line === true) throw new UserError("--header needs a value like 'Name: value'.");
+      const header = parseHeaderLine(line);
+      draft.headers = draft.headers.filter((h) => h.name.toLowerCase() !== header.name.toLowerCase());
+      draft.headers.push(header);
+    }
+  } catch (cause) {
+    if (cause instanceof AttributionError) throw new UserError(cause.message);
+    throw cause;
+  }
+
+  const hint = parseBoolFlag(flags, "hint-headers");
+  if (hint !== undefined) draft.hintHeaders = hint;
+  draft.enabled = parseBoolFlag(flags, "enabled") ?? true;
+
+  let record;
+  try {
+    record = normalizeAttribution(draft);
+  } catch (cause) {
+    if (cause instanceof AttributionError) throw new UserError(cause.message);
+    throw cause;
+  }
+
+  await writeConfig(putAttribution(config, env.name, record));
+  const reapplied = await reapplyAttributionIfActive(env.name, record, previous);
+  const info = describeAttribution(record);
+
+  if (flags.json) {
+    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...info, ...reapplied });
+    return;
+  }
+  printAttribution(env.name, info);
+  process.stdout.write(
+    reapplied.applied
+      ? `\nUpdated ${reapplied.settingsFile}. Restart Claude Code for the change to take effect.\n`
+      : '\nSaved. Applied on the next "kong-ai-switch use <model> --agent claude-code".\n',
+  );
+}
+
+async function cmdAttributionClear(flags) {
+  const { config, env } = await activeEnvironment(flags);
+  const previous = readAttribution(env.attribution);
+  await writeConfig(putAttribution(config, env.name, null));
+  const reapplied = await reapplyAttributionIfActive(env.name, null, previous);
+
+  if (flags.json) {
+    emitJson({ ok: true, environment: env.name, scmProviders: SCM_PROVIDERS, ...describeAttribution(readAttribution(null)), ...reapplied });
+    return;
+  }
+  process.stdout.write(`Removed cost attribution from "${env.name}".\n`);
+  if (reapplied.applied) {
+    process.stdout.write(`Updated ${reapplied.settingsFile}. Restart Claude Code for the change to take effect.\n`);
+  }
+}
+
+async function cmdAttribution(positional, flags) {
+  const [sub] = positional;
+  switch (sub) {
+    case "set":
+      return cmdAttributionSet(flags);
+    case "show":
+    case undefined:
+      return cmdAttributionShow(flags);
+    case "clear":
+    case "rm":
+      return cmdAttributionClear(flags);
+    default:
+      throw new UserError(`Unknown "attribution" subcommand "${sub}". Try: set, show, clear.`);
+  }
+}
+
 async function cmdEnvUse(positional) {
   const name = positional[0];
   if (!name) throw new UserError("Usage: kong-ai-switch env use <name>");
@@ -609,10 +821,13 @@ async function cmdEnvImport(positional, flags) {
   let stored = { backend: BACKEND.NONE, inFile: false };
   if (token) stored = await persistToken(incoming.name, token);
 
-  const next = putEnvironment(config, {
+  let next = putEnvironment(config, {
     ...incoming,
     token: token && stored.inFile ? token : null,
   });
+  if (incoming.attribution) {
+    next = putAttribution(next, incoming.name, readAttribution(incoming.attribution));
+  }
   await writeConfig(next);
 
   process.stdout.write(`Imported environment "${incoming.name}".\n`);
@@ -1096,12 +1311,17 @@ async function cmdUse(positional, flags) {
               oidcAuthFlow: desktopWriter.oidcAuthFlow,
             }
           : {};
+      const attributionOpts =
+        agentId === "claude-code"
+          ? { attribution: env.attribution ?? null, environment: env.name }
+          : {};
       applied.push(
         await applyToAgent(agentId, profileForAgent, {
           token,
           authKind,
           clientId: oidcClientId,
           ...desktopOpts,
+          ...attributionOpts,
         }),
       );
     } catch (cause) {
@@ -1111,6 +1331,10 @@ async function cmdUse(positional, flags) {
 
   const result = applied.find((a) => a.agent === "claude-code") ?? applied[0];
   await writeState(putEnvironmentState(state, env.name, { ...entry, current: profile.id }));
+
+  const attributionInfo = applied.some((a) => a.agent === "claude-code")
+    ? describeAttribution(readAttribution(env.attribution))
+    : null;
 
   if (flags.json) {
     emitJson({
@@ -1124,6 +1348,16 @@ async function cmdUse(positional, flags) {
       settingsFile: result.file,
       created: result.created,
       agents: applied,
+      attribution: attributionInfo
+        ? {
+            enabled: attributionInfo.attribution.enabled,
+            hintHeaders: attributionInfo.hintHeaders,
+            preview: attributionInfo.preview,
+            needsWrapper: attributionInfo.needsWrapper,
+            wrapperFile: attributionInfo.wrapperFile,
+            sourceLine: attributionInfo.sourceLine,
+          }
+        : null,
     });
     return;
   }
@@ -1144,6 +1378,18 @@ async function cmdUse(positional, flags) {
     if (a.envFile) {
       process.stdout.write(`Wrote ${a.envFile}\n`);
       process.stdout.write(`  source it before launching Copilot:  source ${a.envFile} && copilot\n`);
+    }
+  }
+  if (attributionInfo?.attribution.enabled) {
+    const count = attributionInfo.headers.length + attributionInfo.dynamicHeaders.length;
+    process.stdout.write(
+      `Cost attribution: ${count} header(s)${attributionInfo.hintHeaders ? " + gateway hint headers" : ""} for "${env.name}".\n`,
+    );
+    if (attributionInfo.needsWrapper) {
+      process.stdout.write(
+        `Wrote ${attributionInfo.wrapperFile} (git-derived repository/branch).\n` +
+          `  add once to ~/.zshrc:  ${attributionInfo.sourceLine}\n`,
+      );
     }
   }
   process.stdout.write(`Restart ${names} for the change to take effect.\n`);
@@ -1336,6 +1582,9 @@ async function main() {
       case "agents":
         await cmdAgents(flags);
         return 0;
+      case "attribution":
+        await cmdAttribution(positional, flags);
+        return 0;
       case "status":
         await cmdStatus(flags);
         return 0;
@@ -1344,7 +1593,12 @@ async function main() {
         return 2;
     }
   } catch (cause) {
-    if (cause instanceof UserError || cause instanceof KongApiError || cause instanceof ConfigError) {
+    if (
+      cause instanceof UserError ||
+      cause instanceof KongApiError ||
+      cause instanceof ConfigError ||
+      cause instanceof AttributionError
+    ) {
       // Same envelope as success, so a caller parses one shape either way.
       if (flags.json) emitJson({ ok: false, error: cause.message });
       else process.stderr.write(`${cause.message}\n`);

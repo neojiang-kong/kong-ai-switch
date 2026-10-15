@@ -9,6 +9,8 @@ A native SwiftUI menu bar app for switching Claude Code between Kong AI Gateway 
 open build/KongAISwitch.app
 ```
 
+The Finder/Launchpad icon is `Resources/AppIcon.icns`; regenerate it with `scripts/make-icon.sh`.
+
 The app appears in the menu bar as a branch icon. It has no Dock icon, which is what `LSUIElement` in the bundle's Info.plist declares.
 
 To quit, use Quit in the panel, or:

@@ -23,7 +23,14 @@ final class AppState: ObservableObject {
     @Published var cliMissingReason: CLIDiscovery.Failure?
     @Published var showingSetup = false
     @Published var showingDesktopSettings = false
+    @Published var showingAttributionSettings = false
     @Published var editingEnvironment: KongEnvironment?
+
+    /// Claude Code cost attribution for `attributionEnvironment` (CLI-owned).
+    @Published var attributionDraft = AttributionDraft()
+    @Published var attributionEnvironment: String?
+    @Published var attributionError: String?
+    @Published var attributionSaving = false
 
     /// Claude Desktop configLibrary writer options (UserDefaults).
     @Published var desktopPrefs = DesktopWriterPrefs.load()
@@ -292,6 +299,93 @@ final class AppState: ObservableObject {
         showingDesktopSettings = false
     }
 
+    var activeEnvironmentLabel: String {
+        activeEnvironment?.label ?? activeEnvironmentName ?? "—"
+    }
+
+    /// Load the active environment's attribution from the CLI, then show the panel.
+    func beginAttributionSettings() {
+        let name = activeEnvironmentName
+        attributionError = nil
+        perform("Loading attribution") { cli in
+            try cli.showAttribution(environment: name)
+        } then: { result in
+            self.attributionEnvironment = result.environment
+            self.attributionDraft = AttributionDraft(settings: result.attribution)
+            self.showingAttributionSettings = true
+        }
+    }
+
+    func cancelAttributionSettings() {
+        showingAttributionSettings = false
+        attributionError = nil
+        attributionSaving = false
+    }
+
+    func addAttributionHeader() {
+        attributionDraft.settings.headers.append(AttributionHeader())
+    }
+
+    func removeAttributionHeader(_ id: UUID) {
+        attributionDraft.settings.headers.removeAll { $0.id == id }
+    }
+
+    func copyAttributionSourceLine() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(Attribution.sourceLine, forType: .string)
+        toast = "Copied. Paste it into ~/.zshrc, then open a new terminal."
+    }
+
+    func submitAttributionSettings() {
+        let draft = attributionDraft
+        if let problem = draft.validationError {
+            attributionError = problem
+            return
+        }
+        guard let cli else {
+            cliMissing = true
+            return
+        }
+        let name = attributionEnvironment ?? activeEnvironmentName
+        let settings = draft.resolved
+        attributionSaving = true
+        attributionError = nil
+        busy = "Saving attribution"
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let result = try cli.setAttribution(environment: name, settings: settings)
+                await MainActor.run {
+                    self.attributionSaving = false
+                    self.busy = nil
+                    self.showingAttributionSettings = false
+                    self.toast = Self.attributionToast(result)
+                }
+            } catch {
+                await MainActor.run {
+                    self.attributionSaving = false
+                    self.busy = nil
+                    self.attributionError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private static func attributionToast(_ result: AttributionResult) -> String {
+        guard result.attribution.enabled else {
+            return result.applied == true
+                ? "Attribution off for \(result.environment). Restart Claude Code."
+                : "Attribution off for \(result.environment)."
+        }
+        var text = result.applied == true
+            ? "Attribution saved and applied. Restart Claude Code."
+            : "Attribution saved. Applied on the next Claude Code switch."
+        if result.needsWrapper {
+            text += " Git values need the source line in ~/.zshrc."
+        }
+        return text
+    }
+
     /// Whether this model still needs the user to type a credential in the UI.
     ///
     /// The whole point of the menu bar app is that the user never opens a
@@ -392,7 +486,8 @@ final class AppState: ObservableObject {
                     self.credentialSaveOnly = false
                     self.credentialDesktopMode = nil
                     self.toast = self.switchToast(
-                        displayName: result.displayName, agentId: agentId, agentName: agentName)
+                        displayName: result.displayName, agentId: agentId, agentName: agentName,
+                        attribution: result.attribution)
                     self.refresh()
                 }
             } catch {
@@ -633,11 +728,21 @@ final class AppState: ObservableObject {
     }
 
     /// Toast copy after a successful switch — Copilot needs a sourced env file.
-    private func switchToast(displayName: String, agentId: String, agentName: String) -> String {
+    private func switchToast(
+        displayName: String, agentId: String, agentName: String,
+        attribution: SwitchAttribution? = nil
+    ) -> String {
         if agentId == "github-copilot" {
             return "Now using \(displayName). In a terminal: source ~/.copilot/kong-ai-switch.env && copilot"
         }
-        return "Now using \(displayName). Restart \(agentName)."
+        var text = "Now using \(displayName). Restart \(agentName)."
+        if let attribution, attribution.enabled {
+            text += " Cost attribution on."
+            if attribution.needsWrapper {
+                text += " Git values need the source line from Attribution… in ~/.zshrc."
+            }
+        }
+        return text
     }
 
     /// Whether a model row should show as selected for the current agent.

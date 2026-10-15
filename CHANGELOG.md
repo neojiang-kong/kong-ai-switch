@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.7
+
+### Features
+- **Claude Code cost attribution** — Kong AI cost-management headers (`ai-cost-project`, `ai-cost-scm-provider`, `ai-cost-scm-repository`, `ai-cost-scm-branch`, plus any custom `Name: value` headers) and `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`, stored per environment in `~/.kong-ai-switch/config.json` (and carried by `env export`/`env import`).
+- **Attribution… panel in the macOS app** (footer, when Claude Code is selected): enable toggle, gateway hint headers toggle, project, SCM provider picker, repository/branch as a fixed value or **Auto from git**, editable extra headers, and a live preview of the header block and the `~/.zshrc` source line.
+- Static headers are merged into `~/.claude/settings.json` `env.ANTHROPIC_CUSTOM_HEADERS` after the key-auth credential header, which is never dropped. Disabling removes only attribution lines and `CLAUDE_CODE_GATEWAY_HINT_HEADERS` (now an owned key).
+- **Auto from git** writes `~/.kong-ai-switch/claude-attribution.sh`, a sourceable `claude()` wrapper that computes repository (`owner/repo`, from https/ssh/scp/Azure DevOps remotes) and branch at launch. Shell rc files are never edited; the source line is shown in the app and CLI output.
+- **Kong app icon** — `KongAISwitch.app` now shows the Kong logomark in Finder and Launchpad (`macapp/Resources/AppIcon.icns`, regenerated with `macapp/scripts/make-icon.sh`).
+
+### CLI
+- New `attribution set|show|clear` (`--project`, `--scm-provider`, `--repository <owner/repo>|auto`, `--branch <name>|auto`, repeatable `--header 'Name: value'`, `--remove-header`, `--clear-headers`, `--hint-headers`, `--enabled`, `--json`). `use --agent claude-code` applies the stored attribution, and `set`/`clear` re-apply immediately when Claude Code already points at that environment.
+- Flags accept `--name=value` (allows empty values and values starting with `--`).
+- Header names are validated as HTTP tokens; values are trimmed and must be a single line.
+
 ## 0.2.6
 
 ### Features

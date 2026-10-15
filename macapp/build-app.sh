@@ -74,6 +74,13 @@ else
   echo "warning: KongAISwitch_KongAISwitch.bundle not found; logos will fall back to SF Symbols" >&2
 fi
 
+# Finder / Launchpad icon. Regenerate with scripts/make-icon.sh.
+if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
+  cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+else
+  echo "warning: Resources/AppIcon.icns not found; the app will use a generic icon" >&2
+fi
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,10 +94,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>Kong AI Switch</string>
     <key>CFBundleDisplayName</key>
     <string>Kong AI Switch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.6</string>
+    <string>0.2.7</string>
     <key>CFBundleVersion</key>
     <string>4</string>
     <key>LSMinimumSystemVersion</key>

@@ -15,6 +15,14 @@ import { readFile, writeFile, rename, mkdir, stat, unlink } from "node:fs/promis
 import { homedir } from "node:os";
 import path from "node:path";
 import { authWithKind } from "../kong/auth.js";
+import {
+  applyAttributionToEnv,
+  attributionWrapperPath,
+  buildAttributionWrapper,
+  buildInactiveWrapper,
+  readAttribution,
+  usesAutoGit,
+} from "./attribution.js";
 
 /** Local Claude Desktop 3P configLibrary root for this OS. */
 export function claudeDesktopLibraryDir(home = homedir()) {
@@ -44,6 +52,7 @@ export const AGENTS = {
       "ANTHROPIC_CUSTOM_HEADERS",
       "ANTHROPIC_MODEL",
       "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
+      "CLAUDE_CODE_GATEWAY_HINT_HEADERS",
     ],
   },
 
@@ -533,11 +542,8 @@ function applyJsonEnv(settings, profile, { token }) {
   // Always clear the channel the other strategy uses. Dual-strategy models
   // reject a stale Bearer even when a valid apikey is also present, and an
   // leftover apikey header after an OIDC switch is equally confusing.
-  const header = profile.auth?.preferred?.header;
-  const usesCustomHeader =
-    profile.auth?.preferred?.kind === "key-auth" &&
-    header &&
-    header.toLowerCase() !== "authorization";
+  const header = claudeCredentialHeader(profile);
+  const usesCustomHeader = Boolean(header);
 
   if (token && usesCustomHeader) {
     env.ANTHROPIC_CUSTOM_HEADERS = `${header}: ${token}`;
@@ -554,6 +560,69 @@ function applyJsonEnv(settings, profile, { token }) {
 
   next.env = env;
   return next;
+}
+
+/** The custom header a key-auth credential travels in, or null for bearer auth. */
+export function claudeCredentialHeader(profile) {
+  const header = profile?.auth?.preferred?.header;
+  const usesCustomHeader =
+    profile?.auth?.preferred?.kind === "key-auth" &&
+    header &&
+    header.toLowerCase() !== "authorization";
+  return usesCustomHeader ? header : null;
+}
+
+/**
+ * Write (or neutralise) the git-attribution shell wrapper.
+ * Only creates a file when one is needed; an existing file is replaced with an
+ * inert stub so a `source` line in the user's rc file keeps working.
+ */
+async function writeAttributionWrapper(attribution, { home, staticBlock, environment }) {
+  const file = attributionWrapperPath(home);
+  if (usesAutoGit(attribution)) {
+    await writeAtomic(file, buildAttributionWrapper(attribution, { staticBlock, environment, home }));
+    return { file, active: true };
+  }
+  try {
+    await stat(file);
+  } catch {
+    return { file, active: false };
+  }
+  await writeAtomic(file, buildInactiveWrapper());
+  return { file, active: false };
+}
+
+/**
+ * Re-apply attribution to Claude Code's settings.json without switching model.
+ *
+ * `previous` is the attribution being replaced, so its extra headers are
+ * removed; `credentialHeader` is protected from ever being treated as one.
+ */
+export async function applyClaudeAttribution({
+  attribution,
+  previous,
+  credentialHeader,
+  environment,
+  home = homedir(),
+} = {}) {
+  const agent = getAgent("claude-code");
+  const file = agent.configPath(home);
+  const record = readAttribution(attribution);
+  const { settings } = await readJsonSettings(file);
+  const next = structuredClone(settings);
+  const env = { ...(next.env ?? {}) };
+  applyAttributionToEnv(env, record, {
+    credentialHeader,
+    previous: previous ? readAttribution(previous) : undefined,
+  });
+  next.env = env;
+  await writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
+  const wrapper = await writeAttributionWrapper(record, {
+    home,
+    staticBlock: env.ANTHROPIC_CUSTOM_HEADERS ?? "",
+    environment,
+  });
+  return { file, wrapperFile: wrapper.file, wrapperActive: wrapper.active };
 }
 
 // ---------------------------------------------------------------------------
@@ -799,6 +868,9 @@ export async function applyToAgent(
     oidcBearerTokenType,
     oidcAppendOfflineAccess,
     oidcAuthFlow,
+    attribution,
+    previousAttribution,
+    environment,
   } = {},
 ) {
   const agent = getAgent(agentId);
@@ -816,8 +888,27 @@ export async function applyToAgent(
   if (agent.kind === "json-env") {
     const { settings, existed } = await readJsonSettings(file);
     const next = applyJsonEnv(settings, effective, { token });
+    const record = readAttribution(attribution);
+    applyAttributionToEnv(next.env, record, {
+      credentialHeader: claudeCredentialHeader(effective),
+      previous: previousAttribution ? readAttribution(previousAttribution) : undefined,
+    });
     await writeAtomic(file, JSON.stringify(next, null, 2) + "\n");
-    return { agent: agent.id, file, created: !existed };
+    const wrapper = await writeAttributionWrapper(record, {
+      home,
+      staticBlock: next.env.ANTHROPIC_CUSTOM_HEADERS ?? "",
+      environment,
+    });
+    return {
+      agent: agent.id,
+      file,
+      created: !existed,
+      attribution: {
+        enabled: record.enabled,
+        wrapperFile: wrapper.file,
+        wrapperActive: wrapper.active,
+      },
+    };
   }
 
   if (agent.kind === "codex-toml") {

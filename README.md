@@ -43,7 +43,7 @@ Pre-built app (**latest release**, Apple Silicon / ad-hoc signed):
 
 Unzip, drag `KongAISwitch.app` into **Applications**, then open it. On first launch macOS may require **right-click → Open** (Gatekeeper) because the build is not Developer ID–notarized.
 
-Environment setup in the app has a Konnect **Region** picker (Auto-detect, US, EU, AU, ME, IN, SG). Claude Desktop options — credential mode (Static JWT vs Interactive OIDC) and OIDC fields — live under the **Desktop…** button in the panel footer.
+Environment setup in the app has a Konnect **Region** picker (Auto-detect, US, EU, AU, ME, IN, SG). Claude Desktop options — credential mode (Static JWT vs Interactive OIDC) and OIDC fields — live under the **Desktop…** button in the panel footer, and Claude Code cost-attribution headers under **Attribution…** (shown when Claude Code is selected). The app carries a Kong icon in Finder and Launchpad.
 
 **Requirement:** [Node.js 20+](https://nodejs.org/) (`brew install node`). The CLI ships **inside the app** — no separate checkout or `npm install` needed.
 
@@ -130,8 +130,33 @@ On macOS, tokens go to the login Keychain, so they stay out of your dotfiles and
 | `list` | Show switchable models for an agent. `--agent codex` to scope it, `--all` to include unusable ones, `--json` for scripting |
 | `use <model>` | Point an agent at a model. `--agent codex` or `--agent claude-code,codex` |
 | `status` | Show where Claude Code points, and which environment it came from |
+| `attribution set\|show\|clear` | Cost-attribution headers Claude Code sends, per environment (see below) |
 
 Every model command takes `--env <name>` to act on one environment without changing the active one.
+
+## Cost attribution for Claude Code
+
+Kong AI Gateway can attribute spend by request headers such as `ai-cost-project` and `ai-cost-scm-repository`. Claude Code sends extra headers from `ANTHROPIC_CUSTOM_HEADERS` (one `Name: value` per line), and the request kind and agent type when `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
+
+Attribution is stored **per environment** in `~/.kong-ai-switch/config.json`, so each Konnect org or customer can carry its own project. It is applied on every `use --agent claude-code`, and immediately when Claude Code already points at that environment. In the app, select Claude Code and choose **Attribution…** in the footer.
+
+```bash
+kong-ai-switch attribution set --project payments-api --scm-provider github \
+  --repository auto --branch auto --header 'ai-cost-team: platform'
+kong-ai-switch attribution show
+kong-ai-switch attribution clear
+```
+
+- **Static values** go into `~/.claude/settings.json` `env.ANTHROPIC_CUSTOM_HEADERS`, after the key-auth credential header (`apikey: …`) when there is one. The credential line is never replaced or dropped. Turning attribution off removes only the attribution lines and `CLAUDE_CODE_GATEWAY_HINT_HEADERS`.
+- **`auto` repository/branch** are read from git when Claude Code starts. `settings.json` cannot run commands, so the switch writes `~/.kong-ai-switch/claude-attribution.sh`, which defines a `claude()` wrapper that adds `ai-cost-scm-repository` (from `git remote get-url origin`, normalised to `owner/repo`) and `ai-cost-scm-branch` (from `git branch --show-current`). Add this line to `~/.zshrc` once; kong-ai-switch never edits your rc files:
+
+  ```bash
+  [ -f "$HOME/.kong-ai-switch/claude-attribution.sh" ] && source "$HOME/.kong-ai-switch/claude-attribution.sh"
+  ```
+
+  The wrapper passes the headers both as the environment variable and through `claude --settings`, because `settings.json` `env` takes precedence over the inherited environment. Launches that do not go through the shell (IDE extensions, for example) still send the static headers.
+- `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` is set whenever attribution is on; turn it off with `--hint-headers false`. `--header` is repeatable; `--remove-header <Name>` and `--clear-headers` drop custom ones.
+- Header names must be valid HTTP tokens and values a single line. `apikey`, `Authorization` and `x-api-key` are reserved for the gateway credential.
 
 ## What it writes
 

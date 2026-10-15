@@ -352,6 +352,29 @@ public struct KongCLI: Sendable {
         return try run(args, as: SwitchResult.self)
     }
 
+    /// Cost-attribution headers stored for one environment.
+    public func showAttribution(environment: String?) throws -> AttributionResult {
+        var args = ["attribution", "show"]
+        if let environment { args += ["--env", environment] }
+        return try run(args, as: AttributionResult.self)
+    }
+
+    /// Replace an environment's attribution. The CLI also rewrites Claude
+    /// Code's settings right away when it already points at this environment.
+    public func setAttribution(environment: String?, settings: AttributionSettings) throws
+        -> AttributionResult
+    {
+        try run(
+            Attribution.setArguments(environment: environment, settings: settings),
+            as: AttributionResult.self)
+    }
+
+    public func clearAttribution(environment: String?) throws -> AttributionResult {
+        var args = ["attribution", "clear"]
+        if let environment { args += ["--env", environment] }
+        return try run(args, as: AttributionResult.self)
+    }
+
     /// Save a long-lived API key without switching agents.
     public func setCredential(model: String, environment: String?, token: String) throws {
         var args = [location.script.path, "credential", "set", model, "--token", token]

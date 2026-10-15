@@ -17,6 +17,8 @@ struct MenuView: View {
                 SetupView(state: state, editing: state.editingEnvironment)
             } else if state.showingDesktopSettings {
                 DesktopSettingsView(state: state)
+            } else if state.showingAttributionSettings {
+                AttributionSettingsView(state: state)
             } else if let profile = state.credentialFor {
                 CredentialView(state: state, profile: profile)
             } else if state.environments.isEmpty {
@@ -577,6 +579,11 @@ struct MenuView: View {
                 if state.selectedAgentId == "claude-desktop" {
                     Button("Desktop…") { state.beginDesktopSettings() }
                         .disabled(state.busy != nil)
+                }
+                if state.selectedAgentId == "claude-code" {
+                    Button("Attribution…") { state.beginAttributionSettings() }
+                        .disabled(state.busy != nil || state.environments.isEmpty)
+                        .help("Cost-attribution headers Claude Code sends for this environment")
                 }
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }

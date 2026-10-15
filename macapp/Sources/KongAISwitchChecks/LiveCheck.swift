@@ -58,6 +58,16 @@ enum LiveCheck {
                 : "not configured"
         }
 
+        attempt("attribution show") {
+            guard let envs = try? cli.listEnvironments(), !envs.isEmpty else {
+                return "skipped (no environments defined yet)"
+            }
+            let result = try cli.showAttribution(environment: nil)
+            return result.attribution.enabled
+                ? "\(result.environment): enabled, wrapper \(result.needsWrapper ? "needed" : "not needed")"
+                : "\(result.environment): disabled"
+        }
+
         // Discovery is the step that makes setup token-first, so check it
         // resolves a gateway and its proxy URL from a token alone.
         if let token = ProcessInfo.processInfo.environment["LIVE_TOKEN"] {

@@ -152,6 +152,8 @@ export function putEnvironment(config, { name, region, proxyUrl, gateway, token,
     updatedAt: new Date().toISOString(),
   };
 
+  if (existing.attribution) record.attribution = existing.attribution;
+
   // Only persist a token here when it could not go to the keychain.
   if (token !== undefined) {
     if (token === null) delete record.token;
@@ -163,6 +165,17 @@ export function putEnvironment(config, { name, region, proxyUrl, gateway, token,
   next.environments[safeName] = record;
   if (!next.active) next.active = safeName;
   return next;
+}
+
+/** Store (or with null, drop) an environment's cost-attribution settings. */
+export function putAttribution(config, name, attribution) {
+  const safeName = validateName(name);
+  const existing = config.environments?.[safeName];
+  if (!existing) throw new ConfigError(`No environment named "${safeName}".`);
+  const record = { ...existing, updatedAt: new Date().toISOString() };
+  if (attribution) record.attribution = attribution;
+  else delete record.attribution;
+  return { ...config, environments: { ...config.environments, [safeName]: record } };
 }
 
 export function removeEnvironment(config, name) {
@@ -246,6 +259,7 @@ export function toShareable(env) {
     proxyUrl: env.proxyUrl ?? null,
     gateway: env.gateway ?? null,
     description: env.description ?? null,
+    ...(env.attribution ? { attribution: env.attribution } : {}),
   };
 }
 
@@ -271,5 +285,8 @@ export function fromShareable(raw, { name } = {}) {
     proxyUrl: validateProxyUrl(parsed.proxyUrl ?? null),
     gateway: parsed.gateway || null,
     description: parsed.description || null,
+    ...(parsed.attribution && typeof parsed.attribution === "object"
+      ? { attribution: parsed.attribution }
+      : {}),
   };
 }
