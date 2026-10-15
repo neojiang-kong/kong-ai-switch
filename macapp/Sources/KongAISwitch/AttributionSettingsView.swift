@@ -18,8 +18,8 @@ struct AttributionSettingsView: View {
                 Text("Cost attribution")
                     .font(.title3.weight(.semibold))
                 Text(
-                    "Headers Claude Code sends to Kong AI Gateway so spend is attributed to a "
-                        + "project and repository. Saved for environment "
+                    "Tags Kong AI cost management reports for Claude Code: some Claude Code "
+                        + "sends itself, the rest come from headers you add. Saved for environment "
                         + "“\(state.attributionEnvironment ?? state.activeEnvironmentLabel)”."
                 )
                 .font(.system(size: 11))
@@ -31,19 +31,11 @@ struct AttributionSettingsView: View {
                     .font(.system(size: 12, weight: .medium))
 
                 Group {
-                    group("Gateway hints") {
-                        Toggle("Send gateway hint headers", isOn: settings.hintHeaders)
-                            .toggleStyle(.checkbox)
-                            .font(.system(size: 12))
-                        caption("Sets CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 so Claude Code also sends the request kind and agent type.")
-                    }
+                    autoSentGroup
 
-                    group("Headers") {
-                        labeledField(Attribution.projectHeader) {
-                            TextField("payments-api", text: settings.project)
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        labeledField(Attribution.scmProviderHeader) {
+                    group("From the headers you add") {
+                        caption("Kong reports these three tags from headers kong-ai-switch adds for you.")
+                        tagField("Source control provider", header: Attribution.scmProviderHeader) {
                             Picker("Provider", selection: draft.scmChoice) {
                                 Text("Not set").tag("")
                                 ForEach(Attribution.scmProviders, id: \.self) { provider in
@@ -58,14 +50,16 @@ struct AttributionSettingsView: View {
                             }
                         }
                         gitField(
-                            Attribution.repositoryHeader,
+                            "Repository",
+                            header: Attribution.repositoryHeader,
                             auto: settings.repositoryAuto,
                             value: settings.repository,
                             placeholder: "acme/payments-api",
                             autoHint: "owner/repo from `git remote get-url origin`"
                         )
                         gitField(
-                            Attribution.branchHeader,
+                            "Branch",
+                            header: Attribution.branchHeader,
                             auto: settings.branchAuto,
                             value: settings.branch,
                             placeholder: "main",
@@ -73,7 +67,14 @@ struct AttributionSettingsView: View {
                         )
                     }
 
-                    group("Extra headers") {
+                    group("Additional headers") {
+                        caption("Sent as well, beyond the three tags above.")
+                        tagField("Project", header: Attribution.projectHeader) {
+                            TextField("payments-api", text: settings.project)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                        Text("Custom headers")
+                            .font(.system(size: 11, weight: .medium))
                         ForEach(settings.headers) { $header in
                             HStack(spacing: 6) {
                                 TextField("Name", text: $header.name)
@@ -130,6 +131,43 @@ struct AttributionSettingsView: View {
         .frame(width: 380, height: 560)
     }
 
+    private var autoSentGroup: some View {
+        let hintsOn = state.attributionDraft.settings.hintHeaders
+        return group("Sent by Claude Code automatically") {
+            caption("Claude Code sends these itself; nothing to configure. Two need the hint toggle below.")
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Attribution.autoSentTags, id: \.self) { tag in
+                    let sent = !tag.needsHintHeaders || hintsOn
+                    HStack(spacing: 6) {
+                        Image(systemName: sent ? "checkmark.circle.fill" : "minus.circle")
+                            .foregroundStyle(sent ? Color.green : Color.secondary)
+                            .font(.system(size: 11))
+                        Text(tag.name)
+                            .font(.system(size: 12))
+                            .foregroundStyle(sent ? .primary : .secondary)
+                        Spacer()
+                        if tag.needsHintHeaders {
+                            Text(hintsOn ? "hint headers" : "not sent")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            Toggle("Send gateway hint headers", isOn: settings.hintHeaders)
+                .toggleStyle(.checkbox)
+                .font(.system(size: 12))
+                .padding(.top, 2)
+            caption("Sets CLAUDE_CODE_GATEWAY_HINT_HEADERS=1, which makes Claude Code send Agent request kind and Agent type.")
+            if !hintsOn {
+                Text("Off: Agent request kind and Agent type won't be sent.")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private var previewGroup: some View {
         group("Preview") {
             let preview = state.attributionDraft.preview
@@ -176,11 +214,11 @@ struct AttributionSettingsView: View {
     }
 
     private func gitField(
-        _ label: String, auto: Binding<Bool>, value: Binding<String>,
+        _ title: String, header: String, auto: Binding<Bool>, value: Binding<String>,
         placeholder: String, autoHint: String
     ) -> some View {
-        labeledField(label) {
-            Picker(label, selection: auto) {
+        tagField(title, header: header) {
+            Picker(title, selection: auto) {
                 Text("Fixed value").tag(false)
                 Text("Auto from git").tag(true)
             }
@@ -216,13 +254,18 @@ struct AttributionSettingsView: View {
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private func labeledField<Content: View>(
-        _ label: String, @ViewBuilder content: () -> Content
+    /// Field titled by the reported tag, with the header it travels in.
+    private func tagField<Content: View>(
+        _ title: String, header: String, @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                Text(header)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
             content()
         }
     }

@@ -409,6 +409,16 @@ check(
     Attribution.validationError(AttributionSettings(project: "a\nb")) != nil
 )
 check("auto git is detected", attributionSample.usesAutoGit)
+checkEqual(
+    "auto-sent tags match what Kong reports",
+    Attribution.autoSentTags.map(\.name),
+    ["Agent session", "Agent ID", "Parent agent", "Agent request kind", "Agent type"]
+)
+checkEqual(
+    "only request kind and agent type need hint headers",
+    Attribution.autoSentTags.filter(\.needsHintHeaders).map(\.name),
+    ["Agent request kind", "Agent type"]
+)
 
 // MARK: - Regions
 

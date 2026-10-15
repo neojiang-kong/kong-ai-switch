@@ -25,6 +25,25 @@ export const ATTRIBUTION_HEADERS = Object.freeze({
 
 export const SCM_PROVIDERS = Object.freeze(["github", "gitlab", "bitbucket", "azure-devops", "other"]);
 
+/**
+ * Tags Kong AI cost management reports for Claude Code that the tool sends
+ * itself. Request kind and agent type need CLAUDE_CODE_GATEWAY_HINT_HEADERS=1.
+ */
+export const AUTO_SENT_TAGS = Object.freeze([
+  Object.freeze({ tag: "Agent session", needsHintHeaders: false }),
+  Object.freeze({ tag: "Agent ID", needsHintHeaders: false }),
+  Object.freeze({ tag: "Parent agent", needsHintHeaders: false }),
+  Object.freeze({ tag: "Agent request kind", needsHintHeaders: true }),
+  Object.freeze({ tag: "Agent type", needsHintHeaders: true }),
+]);
+
+/** Reported tags that come from headers you add. */
+export const HEADER_TAGS = Object.freeze([
+  Object.freeze({ tag: "Source control provider", key: "scmProvider", header: ATTRIBUTION_HEADERS.scmProvider }),
+  Object.freeze({ tag: "Repository", key: "repository", header: ATTRIBUTION_HEADERS.repository }),
+  Object.freeze({ tag: "Branch", key: "branch", header: ATTRIBUTION_HEADERS.branch }),
+]);
+
 /** Headers the gateway credential travels in; extra headers may not claim them. */
 const RESERVED_HEADER_NAMES = new Set(["authorization", "apikey", "x-api-key"]);
 
@@ -386,6 +405,39 @@ export function buildAttributionWrapper(
   return lines.join("\n");
 }
 
+/**
+ * Attribution grouped the way Kong reports it: tags Claude Code sends itself,
+ * tags from the headers you add, and additional headers beyond those.
+ */
+function describeTags(attribution, hintHeaders, dynamic) {
+  const enabled = Boolean(attribution.enabled);
+  const autoSent = AUTO_SENT_TAGS.map((t) => ({
+    tag: t.tag,
+    needsHintHeaders: t.needsHintHeaders,
+    sent: t.needsHintHeaders ? hintHeaders : true,
+  }));
+  const fromHeaders = HEADER_TAGS.map((t) => {
+    const git = dynamic.find((d) => d.name === t.header);
+    const value = enabled && !git ? attribution[t.key] || null : null;
+    return {
+      tag: t.tag,
+      header: t.header,
+      value,
+      source: git ? `git: ${git.source}` : value ? "fixed" : null,
+    };
+  });
+  const additional = [];
+  if (enabled && attribution.project) {
+    additional.push({ label: "Project", header: ATTRIBUTION_HEADERS.project, value: attribution.project });
+  }
+  if (enabled) {
+    for (const h of attribution.headers ?? []) {
+      if (h.value) additional.push({ label: null, header: h.name, value: h.value });
+    }
+  }
+  return { autoSent, fromHeaders, additional };
+}
+
 /** Everything the CLI and app show about one environment's attribution. */
 export function describeAttribution(attribution, { home = homedir() } = {}) {
   const headers = staticAttributionHeaders(attribution);
@@ -401,12 +453,14 @@ export function describeAttribution(attribution, { home = homedir() } = {}) {
     ...dynamic.map((d) => `${d.name}: $(${d.source})`),
   ].join("\n");
   const needsWrapper = usesAutoGit(attribution);
+  const hintHeaders = Boolean(attribution.enabled && attribution.hintHeaders);
   return {
     attribution,
     headers,
     dynamicHeaders: dynamic,
     preview,
-    hintHeaders: Boolean(attribution.enabled && attribution.hintHeaders),
+    hintHeaders,
+    tags: describeTags(attribution, hintHeaders, dynamic),
     needsWrapper,
     wrapperFile: attributionWrapperPath(home),
     sourceLine: needsWrapper ? attributionSourceLine(home) : null,

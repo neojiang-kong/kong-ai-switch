@@ -318,6 +318,36 @@ test("describe reports the preview and the source line only when needed", () => 
   assert.match(auto.preview, /ai-cost-scm-branch: \$\(git branch --show-current\)/);
 });
 
+test("describe groups attribution by the tags Kong reports", () => {
+  const info = describeAttribution({ ...fullAttribution, branchAuto: true, branch: "" });
+  assert.deepEqual(
+    info.tags.autoSent.map((t) => [t.tag, t.needsHintHeaders, t.sent]),
+    [
+      ["Agent session", false, true],
+      ["Agent ID", false, true],
+      ["Parent agent", false, true],
+      ["Agent request kind", true, true],
+      ["Agent type", true, true],
+    ],
+  );
+  assert.deepEqual(info.tags.fromHeaders, [
+    { tag: "Source control provider", header: "ai-cost-scm-provider", value: "github", source: "fixed" },
+    { tag: "Repository", header: "ai-cost-scm-repository", value: "acme/payments-api", source: "fixed" },
+    { tag: "Branch", header: "ai-cost-scm-branch", value: null, source: "git: git branch --show-current" },
+  ]);
+  assert.deepEqual(info.tags.additional, [
+    { label: "Project", header: "ai-cost-project", value: "payments-api" },
+    { label: null, header: "ai-cost-team", value: "platform" },
+  ]);
+
+  const noHints = describeAttribution({ ...fullAttribution, hintHeaders: false });
+  assert.deepEqual(noHints.tags.autoSent.filter((t) => !t.sent).map((t) => t.tag), ["Agent request kind", "Agent type"]);
+
+  const off = describeAttribution(normalizeAttribution({ project: "p", scmProvider: "github" }));
+  assert.deepEqual(off.tags.fromHeaders.map((t) => t.value), [null, null, null]);
+  assert.deepEqual(off.tags.additional, []);
+});
+
 async function mkdirp(...parts) {
   const dir = path.join(...parts);
   await mkdir(dir, { recursive: true });
@@ -449,6 +479,17 @@ test("attribution set/show/clear round-trip through the CLI per environment", as
   const shown = cli(home, ["attribution", "show", "--json"]);
   assert.equal(shown.json.environment, "acme");
   assert.ok(shown.json.scmProviders.includes("azure-devops"));
+  assert.equal(shown.json.tags.autoSent.length, 5);
+  assert.equal(shown.json.tags.fromHeaders[1].source, "git: git remote get-url origin");
+
+  const human = spawnSync(process.execPath, [CLI, "attribution", "show"], {
+    env: { ...process.env, HOME: home, KONNECT_TOKEN: "" },
+    encoding: "utf8",
+  }).stdout;
+  assert.match(human, /Sent by Claude Code automatically/);
+  assert.match(human, /Agent request kind\s+not sent: gateway hint headers off/);
+  assert.match(human, /From the headers you add:\n\s+Source control provider\s+ai-cost-scm-provider\s+github/);
+  assert.match(human, /Additional headers:\n\s+ai-cost-project\s+payments-api\n\s+ai-cost-team\s+platform/);
 
   const cleared = cli(home, ["attribution", "clear", "--json"]);
   assert.equal(cleared.json.attribution.enabled, false);

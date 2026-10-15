@@ -69,7 +69,23 @@ public struct AttributionResult: Codable, Sendable {
     public let applied: Bool?
 }
 
+/// A tag Kong AI cost management reports that Claude Code sends itself.
+public struct AutoSentTag: Hashable, Sendable {
+    public let name: String
+    /// Sent only with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
+    public let needsHintHeaders: Bool
+}
+
 public enum Attribution {
+    /// Mirrors `AUTO_SENT_TAGS` in `src/config/attribution.js`.
+    public static let autoSentTags: [AutoSentTag] = [
+        AutoSentTag(name: "Agent session", needsHintHeaders: false),
+        AutoSentTag(name: "Agent ID", needsHintHeaders: false),
+        AutoSentTag(name: "Parent agent", needsHintHeaders: false),
+        AutoSentTag(name: "Agent request kind", needsHintHeaders: true),
+        AutoSentTag(name: "Agent type", needsHintHeaders: true),
+    ]
+
     public static let projectHeader = "ai-cost-project"
     public static let scmProviderHeader = "ai-cost-scm-provider"
     public static let repositoryHeader = "ai-cost-scm-repository"

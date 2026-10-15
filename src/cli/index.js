@@ -588,17 +588,42 @@ async function reapplyAttributionIfActive(envName, attribution, previous) {
 
 function printAttribution(envName, info) {
   const a = info.attribution;
-  process.stdout.write(`Cost attribution for "${envName}": ${a.enabled ? "enabled" : "disabled"}\n`);
+  const { autoSent, fromHeaders, additional } = info.tags;
+  const out = (text = "") => process.stdout.write(`${text}\n`);
+  out(`Cost attribution for "${envName}": ${a.enabled ? "enabled" : "disabled"}`);
+
+  out("\nSent by Claude Code automatically (Claude Code sends these itself):");
+  const tagWidth = Math.max(...autoSent.map((t) => t.tag.length));
+  for (const t of autoSent) {
+    const note = t.needsHintHeaders ? (t.sent ? "via gateway hint headers" : "not sent: gateway hint headers off") : "";
+    out(`  ${note ? t.tag.padEnd(tagWidth) : t.tag}${note ? `  ${note}` : ""}`);
+  }
+  out(`  gateway hint headers: ${info.hintHeaders ? "on (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1)" : "off"}`);
+
   if (!a.enabled) {
-    process.stdout.write('  Enable with: kong-ai-switch attribution set --project <name>\n');
+    out('\nEnable the headers you add with: kong-ai-switch attribution set --scm-provider <p> --repository auto --branch auto');
     return;
   }
-  process.stdout.write(`  gateway hint headers  ${info.hintHeaders ? "on (CLAUDE_CODE_GATEWAY_HINT_HEADERS=1)" : "off"}\n`);
-  if (info.preview) {
-    process.stdout.write("  headers:\n");
-    for (const line of info.preview.split("\n")) process.stdout.write(`    ${line}\n`);
+
+  out("\nFrom the headers you add:");
+  const nameWidth = Math.max(...fromHeaders.map((t) => t.tag.length));
+  const headerWidth = Math.max(...fromHeaders.map((t) => t.header.length));
+  for (const t of fromHeaders) {
+    const value = t.source?.startsWith("git: ") ? `auto from ${t.source}` : (t.value ?? "(not set)");
+    out(`  ${t.tag.padEnd(nameWidth)}  ${t.header.padEnd(headerWidth)}  ${value}`);
+  }
+
+  out("\nAdditional headers:");
+  if (additional.length) {
+    const width = Math.max(...additional.map((h) => h.header.length));
+    for (const h of additional) out(`  ${h.header.padEnd(width)}  ${h.value}`);
   } else {
-    process.stdout.write("  headers: (none set)\n");
+    out("  (none)");
+  }
+
+  if (info.preview) {
+    out("\nHeader block (ANTHROPIC_CUSTOM_HEADERS):");
+    for (const line of info.preview.split("\n")) out(`  ${line}`);
   }
   if (info.needsWrapper) {
     process.stdout.write(

@@ -138,6 +138,16 @@ Every model command takes `--env <name>` to act on one environment without chang
 
 Kong AI Gateway can attribute spend by request headers such as `ai-cost-project` and `ai-cost-scm-repository`. Claude Code sends extra headers from `ANTHROPIC_CUSTOM_HEADERS` (one `Name: value` per line), and the request kind and agent type when `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`.
 
+**Tags you get** in Kong AI cost management:
+
+| Sent by Claude Code on its own | From the headers you add |
+| --- | --- |
+| Agent session, Agent ID, Parent agent | Source control provider (`ai-cost-scm-provider`) |
+| Agent request kind, Agent type (need `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`) | Repository (`ai-cost-scm-repository`) |
+| | Branch (`ai-cost-scm-branch`) |
+
+`ai-cost-project` and any custom `--header` are sent as **additional headers** beyond those three tags. `attribution show` and the app's Attribution panel use the same three groups; `attribution show --json` adds them under `tags` (`autoSent`, `fromHeaders`, `additional`).
+
 Attribution is stored **per environment** in `~/.kong-ai-switch/config.json`, so each Konnect org or customer can carry its own project. It is applied on every `use --agent claude-code`, and immediately when Claude Code already points at that environment. In the app, select Claude Code and choose **Attribution…** in the footer.
 
 ```bash

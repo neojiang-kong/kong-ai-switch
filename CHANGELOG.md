@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8
+
+### Changes
+- **Attribution grouped by the tags Kong reports** for Claude Code. The app's Attribution… panel now has three groups: **Sent by Claude Code automatically** (Agent session, Agent ID, Parent agent, Agent request kind, Agent type, with the gateway hint headers toggle and a warning that request kind and agent type are not sent when it is off), **From the headers you add** (Source control provider, Repository, Branch, each with its `ai-cost-scm-*` header and the Auto from git options), and **Additional headers** (`ai-cost-project` and custom headers).
+- `attribution show` prints the same three groups. `--json` gains a `tags` object (`autoSent`, `fromHeaders`, `additional`); existing fields are unchanged.
+- README "Cost attribution for Claude Code" lists the tags you get.
+
 ## 0.2.7
 
 ### Features
