@@ -1,8 +1,8 @@
 {
   "name": "kong-ai-switch",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "private": true,
-  "description": "Switch Claude Code, Codex and Qwen CLI between models served by Kong AI Gateway 2.0",
+  "description": "Switch Claude Code, Claude Desktop, Codex, and Cursor between models served by Kong AI Gateway 2.0",
   "type": "module",
   "bin": {
     "kong-ai-switch": "./src/cli/index.js"

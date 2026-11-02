@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10
+
+### Features
+- **Cursor**, using Magpie's Cursor Private Inference method. `use --agent cursor` writes `CURSOR_LOCAL_AGENT_BASE_URL` and `CURSOR_LOCAL_AGENT_API_KEY` to `~/.kong-ai-switch/cursor-local.env` and, on macOS, sets them with `launchctl`. `~/.cursor` is left untouched. Quit Cursor Private Inference completely and open it again. The regular Cursor editor and Cursor CLI do not read these variables.
+
 ## 0.2.9
 
 ### Features

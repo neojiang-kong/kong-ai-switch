@@ -1,6 +1,6 @@
 # kong-ai-switch
 
-Switch Claude Code, Claude Desktop and Codex between the models your **Kong AI Gateway 2.0** serves, using Kong as the source of truth for what you are allowed to use.
+Switch Claude Code, Claude Desktop, Codex, and Cursor Private Inference between the models your **Kong AI Gateway 2.0** serves, using Kong as the source of truth for what you are allowed to use.
 
 <p align="center">
   <img src="docs/images/menu-panel.png" alt="Kong AI Switch menu bar panel" width="420" />
@@ -128,7 +128,7 @@ On macOS, tokens go to the login Keychain, so they stay out of your dotfiles and
 | `agents` | Which coding agents are known, and where each points |
 | `sync` | Pull the model catalogue for an environment |
 | `list` | Show switchable models for an agent. `--agent codex` to scope it, `--all` to include unusable ones, `--json` for scripting |
-| `use <model>` | Point an agent at a model. `--agent codex` or `--agent claude-code,codex` |
+| `use <model>` | Point an agent at a model. `--agent codex`, `--agent cursor`, or `--agent claude-code,codex` |
 | `status` | Show where Claude Code points, and which environment it came from |
 | `attribution set\|show\|clear` | Cost-attribution headers Claude Code or Codex (`--agent codex`) sends, per environment (see below) |
 
@@ -198,6 +198,8 @@ kong-ai-switch use my-gpt --agent codex
 
 Each agent has its own config file, and only the keys this tool owns are touched. Claude Code uses `~/.claude/settings.json`; Claude Desktop gets its own profile in `~/Library/Application Support/Claude-3p/configLibrary/`; Codex gets a delimited block in `~/.codex/config.toml`, leaving the rest of that file verbatim.
 
+Cursor follows [Magpie](https://github.com/yetone/magpie)'s Cursor Private Inference wiring. That build reads `CURSOR_LOCAL_AGENT_BASE_URL` and `CURSOR_LOCAL_AGENT_API_KEY`; the regular Cursor editor and `cursor-agent` do not. The switch writes those two variables to `~/.kong-ai-switch/cursor-local.env` and, on macOS, sets them for the user session with `launchctl` so an app opened from the Dock sees them. It does not edit `~/.cursor`. Quit Cursor Private Inference completely and open it again. A base URL or API key in its Open configuration overrides the variables. `launchctl` forgets them at logout; the next switch sets them again.
+
 For Claude Code, switching rewrites four keys under `env` and leaves everything else alone:
 
 ```json
@@ -231,7 +233,7 @@ Models behind an AI Auth Strategy need a consumer credential, via `--token` or `
 
 ## Scope
 
-Built and verified against the Konnect AI Gateway API (OAS 3.0, spec 2.0.3), for Claude Code, Claude Desktop and Codex CLI on Konnect-managed gateways.
+Built and verified against the Konnect AI Gateway API (OAS 3.0, spec 2.0.3), for Claude Code, Claude Desktop, Codex CLI, and Cursor Private Inference on Konnect-managed gateways.
 
 Not covered: self-hosted Kong Gateway without Konnect, where AI Models do not exist as entities and discovery would mean enumerating `ai-proxy-advanced` plugins through the Admin API. Qwen Code CLI and GitHub Copilot would each reuse the same sync with their own config writer in `src/config/agents.js`.
 

@@ -105,6 +105,7 @@ struct BrandMark: View {
             case "claude-code", "claude-desktop": return "sparkles"
             case "codex": return "terminal.fill"
             case "github-copilot": return "cat.fill"
+            case "cursor": return "cursorarrow.rays"
             default:
                 switch vendor {
                 case "anthropic": return "sparkles"

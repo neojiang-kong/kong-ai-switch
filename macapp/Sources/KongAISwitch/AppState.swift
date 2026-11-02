@@ -742,6 +742,9 @@ final class AppState: ObservableObject {
         if agentId == "github-copilot" {
             return "Now using \(displayName). In a terminal: source ~/.copilot/kong-ai-switch.env && copilot"
         }
+        if agentId == "cursor" {
+            return "Now using \(displayName). Quit Cursor Private Inference completely and open it again."
+        }
         var text = "Now using \(displayName). Restart \(agentName)."
         if let attribution, attribution.enabled {
             text += " Cost attribution on."

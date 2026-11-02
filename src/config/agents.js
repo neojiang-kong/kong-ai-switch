@@ -11,9 +11,11 @@
  * 404 is worse than not offering it, so each agent declares what it accepts.
  */
 
+import { execFile } from "node:child_process";
 import { readFile, writeFile, rename, mkdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { authWithKind } from "../kong/auth.js";
 import {
   ATTRIBUTION_HEADERS,
@@ -111,6 +113,25 @@ export const AGENTS = {
     configPath: (home) => path.join(home, ".copilot", "settings.json"),
     envPath: (home) => path.join(home, ".copilot", "kong-ai-switch.env"),
     ownedKeys: ["model", "COPILOT_PROVIDER_BASE_URL", "COPILOT_MODEL"],
+  },
+
+  /**
+   * Cursor Private Inference, the build Magpie wires to an external gateway.
+   *
+   * Magpie writes nothing under ~/.cursor: that directory is shared with the
+   * regular editor, and the editor's OpenAI override would move both apps.
+   * This build reads CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY
+   * instead. On macOS those are set with launchctl so a Dock launch sees them.
+   * https://github.com/yetone/magpie/blob/main/internal/agent/cursorlocal.go
+   */
+  cursor: {
+    id: "cursor",
+    name: "Cursor",
+    vendor: "cursor",
+    formats: ["openai", "anthropic"],
+    kind: "cursor-local",
+    configPath: (home) => path.join(home, ".kong-ai-switch", "cursor-local.env"),
+    ownedKeys: ["CURSOR_LOCAL_AGENT_BASE_URL", "CURSOR_LOCAL_AGENT_API_KEY"],
   },
 };
 
@@ -1073,6 +1094,132 @@ function applyCopilotSettings(settings, profile) {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor Private Inference (Magpie's cursor-local agent)
+// ---------------------------------------------------------------------------
+
+/** The two variables Cursor Private Inference reads. Regular Cursor ignores them. */
+export const CURSOR_LOCAL_VARS = Object.freeze([
+  "CURSOR_LOCAL_AGENT_BASE_URL",
+  "CURSOR_LOCAL_AGENT_API_KEY",
+]);
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Set or clear the Cursor Private Inference variables in the macOS user session.
+ *
+ * `env` null unsets both. launchd forgets them at logout; the next switch
+ * sets them again. Other platforms have no launchctl session to write.
+ */
+export async function setCursorUserEnv(env, { platform = process.platform, run = execFileAsync } = {}) {
+  if (platform !== "darwin") return false;
+  for (const key of CURSOR_LOCAL_VARS) {
+    const args = env && Object.hasOwn(env, key) ? ["setenv", key, String(env[key])] : ["unsetenv", key];
+    try {
+      await run("launchctl", args);
+    } catch (cause) {
+      const action = args[0];
+      throw new Error(
+        `Could not ${action} ${key} with launchctl (${cause?.code ?? "error"}). ` +
+          `Cursor Private Inference opened from the Dock will not see the new endpoint.`,
+      );
+    }
+  }
+  return true;
+}
+
+/** Env file body. The model line is ours, so status can show which Kong model was chosen. */
+export function applyCursorLocalEnv(profile, { token } = {}) {
+  const baseUrl = String(profile.baseUrl ?? "").replace(/\/+$/, "");
+  const BEGIN = "# >>> kong-ai-switch (managed) >>>";
+  const END = "# <<< kong-ai-switch (managed) <<<";
+  return [
+    BEGIN,
+    "# Cursor Private Inference reads these two variables. Regular Cursor does not.",
+    "# Magpie sets them the same way and does not edit ~/.cursor.",
+    `export CURSOR_LOCAL_AGENT_BASE_URL=${shellQuote(baseUrl)}`,
+    `export CURSOR_LOCAL_AGENT_API_KEY=${shellQuote(token || "kong-ai-gateway")}`,
+    `# model=${profile.clientModelId ?? ""}`,
+    END,
+    "",
+  ].join("\n");
+}
+
+function parseCursorLocalEnv(text) {
+  const baseUrl = text.match(/^export CURSOR_LOCAL_AGENT_BASE_URL='([^']*)'/m)?.[1] ?? null;
+  const hasToken = /^export CURSOR_LOCAL_AGENT_API_KEY='/m.test(text);
+  const model = text.match(/^# model=(.*)$/m)?.[1] || null;
+  return { baseUrl, hasToken, model };
+}
+
+function cursorLocalNotice({ userEnv, file }) {
+  const lines = [
+    "Cursor Private Inference reads CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY.",
+    "Quit that app completely (not only its window) and open it again.",
+    "A base URL or API key in its Open configuration overrides these variables.",
+  ];
+  if (userEnv) {
+    lines.push(
+      "Set both for this macOS user session with launchctl. They clear at logout; the next switch sets them again.",
+    );
+  } else if (process.platform !== "darwin") {
+    lines.push(`Source the file before a shell launch: set -a && source ${file} && set +a`);
+  }
+  return lines.join("\n");
+}
+
+async function applyCursorLocal(agent, profile, { token, home, userEnv }) {
+  const file = agent.configPath(home);
+  let existed = true;
+  try {
+    await stat(file);
+  } catch {
+    existed = false;
+  }
+  const key = token || "kong-ai-gateway";
+  await writeAtomic(file, applyCursorLocalEnv(profile, { token: key }));
+
+  const env = {
+    CURSOR_LOCAL_AGENT_BASE_URL: String(profile.baseUrl ?? "").replace(/\/+$/, ""),
+    CURSOR_LOCAL_AGENT_API_KEY: key,
+  };
+  // A scratch home (tests) must not call launchctl on the real user session.
+  const enableUserEnv = userEnv !== undefined ? userEnv !== false : home === homedir();
+  let userEnvApplied = false;
+  if (enableUserEnv) {
+    userEnvApplied =
+      typeof userEnv === "function" ? Boolean(await userEnv(env)) : await setCursorUserEnv(env);
+  }
+
+  return {
+    agent: agent.id,
+    file,
+    created: !existed,
+    userEnv: userEnvApplied,
+    notice: cursorLocalNotice({ userEnv: userEnvApplied, file }),
+  };
+}
+
+async function statusCursorLocal(agent, { home }) {
+  const file = agent.configPath(home);
+  let text;
+  try {
+    text = await readFile(file, "utf8");
+  } catch {
+    return { agent: agent.id, file, configured: false };
+  }
+  const parsed = parseCursorLocalEnv(text);
+  return {
+    agent: agent.id,
+    file,
+    configured: Boolean(parsed.baseUrl || parsed.model),
+    baseUrl: parsed.baseUrl,
+    model: parsed.model,
+    hasToken: parsed.hasToken,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -1100,6 +1247,7 @@ export async function applyToAgent(
     attribution,
     previousAttribution,
     environment,
+    userEnv,
   } = {},
 ) {
   const agent = getAgent(agentId);
@@ -1171,6 +1319,10 @@ export async function applyToAgent(
     const envFile = agent.envPath(home);
     await writeAtomic(envFile, applyCopilotEnv(effective, { token }));
     return { agent: agent.id, file, envFile, created: !existed };
+  }
+
+  if (agent.kind === "cursor-local") {
+    return applyCursorLocal(agent, effective, { token, home, userEnv });
   }
 
   if (agent.kind === "claude-desktop-3p") {
@@ -1261,6 +1413,10 @@ export async function agentStatus(agentId, { home = homedir() } = {}) {
       hasToken,
       envFile: agent.envPath(home),
     };
+  }
+
+  if (agent.kind === "cursor-local") {
+    return statusCursorLocal(agent, { home });
   }
 
   if (agent.kind === "claude-desktop-3p") {

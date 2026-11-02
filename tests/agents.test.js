@@ -18,6 +18,8 @@ import {
   agentsForModel,
   applyToAgent,
   agentStatus,
+  applyCursorLocalEnv,
+  setCursorUserEnv,
   buildClaudeDesktopProfile,
 } from "../src/config/agents.js";
 
@@ -48,9 +50,11 @@ test("the known agents are listed with their formats", () => {
   assert.ok(ids.includes("claude-code"));
   assert.ok(ids.includes("codex"));
   assert.ok(ids.includes("github-copilot"));
+  assert.ok(ids.includes("cursor"));
   assert.deepEqual(getAgent("claude-code").formats, ["anthropic"]);
   assert.deepEqual(getAgent("codex").formats, ["openai"]);
   assert.deepEqual(getAgent("github-copilot").formats, ["openai", "anthropic"]);
+  assert.deepEqual(getAgent("cursor").formats, ["openai", "anthropic"]);
 });
 
 test("an unknown agent names the ones that exist", () => {
@@ -526,6 +530,91 @@ test("GitHub Copilot agentStatus reads model and base URL", async () => {
   assert.equal(status.configured, true);
   assert.equal(status.model, "my-gpt");
   assert.equal(status.baseUrl, "http://localhost:8000/openai");
+});
+
+test("Cursor uses Magpie's Private Inference variables and leaves ~/.cursor alone", async () => {
+  const home = await scratchHome();
+  const calls = [];
+  const result = await applyToAgent("cursor", openaiProfile, {
+    home,
+    token: "cursor-key",
+    userEnv: async (env) => {
+      calls.push(env);
+      return true;
+    },
+  });
+
+  const text = await readFile(result.file, "utf8");
+  assert.match(text, /export CURSOR_LOCAL_AGENT_BASE_URL='http:\/\/localhost:8000\/openai'/);
+  assert.match(text, /export CURSOR_LOCAL_AGENT_API_KEY='cursor-key'/);
+  assert.match(text, /# model=my-gpt/);
+  assert.equal(result.file, path.join(home, ".kong-ai-switch", "cursor-local.env"));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].CURSOR_LOCAL_AGENT_BASE_URL, "http://localhost:8000/openai");
+  assert.equal(calls[0].CURSOR_LOCAL_AGENT_API_KEY, "cursor-key");
+  await assert.rejects(() => readFile(path.join(home, ".cursor", "cli-config.json"), "utf8"));
+
+  const status = await agentStatus("cursor", { home });
+  assert.equal(status.configured, true);
+  assert.equal(status.model, "my-gpt");
+  assert.equal(status.baseUrl, "http://localhost:8000/openai");
+  assert.equal(status.hasToken, true);
+});
+
+test("Cursor accepts an anthropic-format model on the same variables", async () => {
+  const home = await scratchHome();
+  const result = await applyToAgent("cursor", anthropicProfile, { home, token: "k", userEnv: false });
+  const text = await readFile(result.file, "utf8");
+  assert.match(text, /CURSOR_LOCAL_AGENT_BASE_URL='http:\/\/localhost:8000'/);
+  assert.match(text, /# model=my-claude/);
+  assert.equal(result.userEnv, false);
+});
+
+test("Cursor launchctl sets both variables and does not echo the key in errors", async () => {
+  const calls = [];
+  const applied = await setCursorUserEnv(
+    { CURSOR_LOCAL_AGENT_BASE_URL: "http://gw", CURSOR_LOCAL_AGENT_API_KEY: "secret" },
+    {
+      platform: "darwin",
+      run: async (_cmd, args) => {
+        calls.push(args);
+      },
+    },
+  );
+  assert.equal(applied, true);
+  assert.deepEqual(calls, [
+    ["setenv", "CURSOR_LOCAL_AGENT_BASE_URL", "http://gw"],
+    ["setenv", "CURSOR_LOCAL_AGENT_API_KEY", "secret"],
+  ]);
+
+  const skipped = await setCursorUserEnv({}, { platform: "linux", run: async () => calls.push("nope") });
+  assert.equal(skipped, false);
+  assert.equal(calls.length, 2);
+
+  await assert.rejects(
+    () =>
+      setCursorUserEnv(
+        { CURSOR_LOCAL_AGENT_BASE_URL: "http://gw", CURSOR_LOCAL_AGENT_API_KEY: "secret" },
+        {
+          platform: "darwin",
+          run: async () => {
+            const error = new Error("launchctl setenv CURSOR_LOCAL_AGENT_API_KEY secret failed");
+            error.code = 1;
+            throw error;
+          },
+        },
+      ),
+    (error) => {
+      assert.match(error.message, /launchctl/);
+      assert.equal(error.message.includes("secret"), false);
+      return true;
+    },
+  );
+});
+
+test("Cursor env file quotes a key that contains a quote", () => {
+  const text = applyCursorLocalEnv(openaiProfile, { token: "a'b" });
+  assert.match(text, /CURSOR_LOCAL_AGENT_API_KEY='a'\\''b'/);
 });
 
 test("agents declare a vendor for the UI", () => {

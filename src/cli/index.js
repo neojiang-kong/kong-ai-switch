@@ -1506,6 +1506,7 @@ async function cmdUse(positional, flags) {
       process.stdout.write(`Wrote ${a.envFile}\n`);
       process.stdout.write(`  source it before launching Copilot:  source ${a.envFile} && copilot\n`);
     }
+    if (a.notice) process.stdout.write(`${a.notice}\n`);
   }
   for (const info of attributionInfos) {
     if (!info.attribution.enabled) continue;
