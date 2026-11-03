@@ -6,12 +6,13 @@
 <style>
   :root {
     --bg: #f6f6f6;
-    --panel: rgba(246,246,246,0.96);
+    --panel: rgba(246,246,246,0.98);
     --line: rgba(0,0,0,0.10);
     --text: #1d1d1f;
     --muted: #6e6e73;
     --accent: #007aff;
     --green: #34c759;
+    --fill: rgba(0,0,0,0.06);
   }
   * { box-sizing: border-box; }
   body {
@@ -30,63 +31,102 @@
     width: 380px;
     background: var(--panel);
     border-radius: 12px;
-    box-shadow:
-      0 0 0 0.5px rgba(0,0,0,0.18),
-      0 18px 50px rgba(0,0,0,0.22);
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.18), 0 18px 50px rgba(0,0,0,0.22);
     overflow: hidden;
-    backdrop-filter: blur(40px);
   }
-  .header, .footer, .section { padding: 12px; }
-  .header { padding-bottom: 10px; }
+  .header, .footer { padding: 12px; }
   .title-row { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 15px; }
-  .status { display: flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--text); font-size: 12px; }
+  .status { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; }
   .status .agent { color: var(--muted); }
-  .check { color: var(--green); font-size: 12px; }
   hr { border: 0; border-top: 1px solid var(--line); margin: 0; }
   .label {
     font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
     color: var(--muted); padding: 8px 12px 4px;
   }
-  .row {
-    display: flex; align-items: flex-start; gap: 8px;
-    padding: 5px 12px; cursor: default;
-  }
-  .row.model { padding: 6px 12px; }
-  .radio {
-    width: 14px; height: 14px; border-radius: 50%;
-    border: 1.5px solid #c7c7cc; margin-top: 2px; flex: none;
-    display: grid; place-items: center;
-  }
-  .radio.on {
-    border-color: var(--accent);
-    box-shadow: inset 0 0 0 3.5px var(--accent);
-  }
-  .mark {
-    width: 20px; height: 20px; object-fit: contain; flex: none; margin-top: 1px;
-  }
+  .row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 12px; }
+  .mark { width: 20px; height: 20px; object-fit: contain; flex: none; margin-top: 1px; }
   .mark.sm { width: 16px; height: 16px; }
+  .glyph {
+    width: 20px; height: 20px; border-radius: 5px; flex: none; margin-top: 1px;
+    display: grid; place-items: center; background: #1d1d1f; color: #fff; font-size: 11px;
+  }
   .col { min-width: 0; flex: 1; }
   .name { font-size: 13px; font-weight: 500; }
   .name.regular { font-weight: 400; }
   .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
-  .chips { display: flex; gap: 4px; margin-top: 2px; flex-wrap: wrap; }
+  .chips { display: flex; gap: 4px; margin-top: 3px; flex-wrap: wrap; }
   .chip {
     font-size: 10px; font-weight: 600; color: var(--muted);
-    background: rgba(0,0,0,0.06); padding: 2px 6px; border-radius: 999px;
+    background: var(--fill); padding: 1px 6px; border-radius: 999px;
   }
   .chip.key { color: #248a3d; background: rgba(52,199,89,0.14); }
-  .tick { color: var(--green); font-size: 11px; margin-top: 3px; }
+  .chip.oidc { color: #007aff; background: rgba(0,122,255,0.12); }
+  .radio {
+    width: 16px; height: 16px; border-radius: 50%; margin-top: 2px; flex: none;
+    border: 1.5px solid #aeaeb2;
+  }
+  .radio.on { border: 5px solid var(--accent); }
+  .tick { color: var(--green); font-size: 12px; margin-top: 4px; }
   .footer { display: flex; align-items: center; gap: 8px; }
-  button {
+  button.mini, .btn {
     appearance: none; border: 1px solid rgba(0,0,0,0.12);
     background: #fff; border-radius: 6px; padding: 3px 10px;
     font: inherit; font-size: 12px; color: var(--text);
   }
   .spacer { flex: 1; }
+  .sheet { padding: 14px; }
+  h2 { margin: 0 0 6px; font-size: 18px; font-weight: 600; }
+  .help { font-size: 11px; color: var(--muted); margin: 0 0 10px; }
+  .seg { display: flex; background: rgba(0,0,0,0.06); border-radius: 8px; padding: 2px; margin: 8px 0; }
+  .seg span { flex: 1; text-align: center; font-size: 12px; padding: 5px 0; border-radius: 6px; color: var(--muted); }
+  .seg span.on { background: #fff; color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+  .card {
+    background: rgba(0,0,0,0.05); border-radius: 6px; padding: 10px; margin: 8px 0;
+  }
+  .card .k { font-size: 10px; font-weight: 600; letter-spacing: 0.03em; color: var(--muted); margin-bottom: 6px; }
+  .field { margin: 6px 0; }
+  .field .lab { font-size: 11px; font-weight: 500; }
+  .field .hdr { font-size: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); margin-left: 6px; }
+  .box, .mono {
+    margin-top: 4px; background: #fff; border: 1px solid rgba(0,0,0,0.12);
+    border-radius: 6px; padding: 5px 8px; font-size: 12px;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; background: rgba(0,0,0,0.06); border: 0; }
+  .rowline { display: flex; gap: 6px; align-items: center; font-size: 12px; margin: 2px 0; }
+  .ok { color: var(--green); }
+  .actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .primary {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 7px 12px; font: inherit; font-size: 13px; font-weight: 600; width: 100%;
+  }
+  .check { display: flex; gap: 6px; align-items: center; font-size: 12px; margin-top: 8px; }
+  .sso {
+    width: 380px; background: #fff; border-radius: 12px; overflow: hidden;
+    box-shadow: 0 0 0 0.5px rgba(0,0,0,0.18), 0 18px 50px rgba(0,0,0,0.22);
+  }
+  .sso-bar { background: #1b1f3b; color: #fff; padding: 16px 18px 14px; }
+  .sso-bar .brand { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.75; }
+  .sso-bar h1 { margin: 6px 0 0; font-size: 20px; font-weight: 600; }
+  .sso-body { padding: 16px 18px 18px; }
+  .consent {
+    background: #f4f6fb; border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 12px;
+  }
+  .consent strong { display: block; margin-bottom: 2px; }
+  label.l { display: block; font-size: 12px; font-weight: 600; margin: 8px 0 4px; }
+  input.fake {
+    width: 100%; border: 1px solid #d0d5dd; border-radius: 6px; padding: 8px 10px; font: inherit; background: #fff;
+  }
+  .sso button.go {
+    width: 100%; margin-top: 14px; background: #1b1f3b; color: #fff; border: 0;
+    border-radius: 6px; padding: 9px; font: inherit; font-weight: 600;
+  }
+  .fine { margin-top: 10px; font-size: 10px; color: var(--muted); }
 </style>
 </head>
 <body>
-  <div class="panel" id="panel">
+<div id="view"></div>
+<template id="menu">
+  <div class="panel">
     <div class="header">
       <div class="title-row">
         <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/kong-logomark.png" alt="" />
@@ -94,7 +134,7 @@
       </div>
       <div class="status">
         <img class="mark sm" src="../../macapp/Sources/KongAISwitch/Resources/claude.png" alt="" />
-        <span class="check">●</span>
+        <span class="ok">✓</span>
         <strong>claude-sonnet-4</strong>
         <span class="agent">· Claude Code</span>
       </div>
@@ -109,16 +149,6 @@
       </div>
     </div>
     <hr />
-    <div class="label">AI GATEWAY</div>
-    <div class="row">
-      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/kong-logomark.png" alt="" />
-      <div class="radio on"></div>
-      <div class="col">
-        <div class="name">AI Gateway Production</div>
-        <div class="sub">4 models · https://ai.example.com</div>
-      </div>
-    </div>
-    <hr />
     <div class="label">CODING AGENT</div>
     <div class="row">
       <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/claude.png" alt="" />
@@ -130,10 +160,18 @@
       <span class="tick">✓</span>
     </div>
     <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/claude.png" alt="" />
+      <div class="radio"></div>
+      <div class="col">
+        <div class="name regular">Claude Desktop <span class="chip">ANTHROPIC</span></div>
+        <div class="sub">not set · 2 models</div>
+      </div>
+    </div>
+    <div class="row">
       <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/openai.png" alt="" />
       <div class="radio"></div>
       <div class="col">
-        <div class="name regular">Codex <span class="chip">OPENAI</span></div>
+        <div class="name regular">Codex CLI <span class="chip">OPENAI</span></div>
         <div class="sub">not set · 2 models</div>
       </div>
     </div>
@@ -141,37 +179,155 @@
       <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/github.png" alt="" />
       <div class="radio"></div>
       <div class="col">
-        <div class="name regular">GitHub Copilot <span class="chip">OPENAI</span></div>
-        <div class="sub">not set · 2 models</div>
+        <div class="name regular">GitHub Copilot <span class="chip">OPENAI</span> <span class="chip">ANTHROPIC</span></div>
+        <div class="sub">not set · 4 models</div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="glyph">↗</div>
+      <div class="radio"></div>
+      <div class="col">
+        <div class="name regular">Cursor <span class="chip">OPENAI</span> <span class="chip">ANTHROPIC</span></div>
+        <div class="sub">not set · 4 models</div>
       </div>
     </div>
     <hr />
     <div class="label">MODELS · AI GATEWAY PRODUCTION</div>
-    <div class="row model">
+    <div class="row">
       <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/anthropic.png" alt="" />
-      <div class="radio on" style="box-shadow:none;border:0;color:var(--accent);font-size:14px;line-height:14px">◉</div>
+      <div class="radio on"></div>
       <div class="col">
         <div class="name">Claude Sonnet 4</div>
         <div class="sub">claude-sonnet-4</div>
         <div class="chips"><span class="chip">ANTHROPIC</span><span class="chip key">KEY</span></div>
       </div>
     </div>
-    <div class="row model">
-      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/openai.png" alt="" />
+    <div class="row">
+      <img class="mark" src="../../macapp/Sources/KongAISwitch/Resources/anthropic.png" alt="" />
       <div class="radio"></div>
       <div class="col">
-        <div class="name regular">GPT-4.1</div>
-        <div class="sub">gpt-4.1</div>
-        <div class="chips"><span class="chip">OPENAI</span></div>
+        <div class="name regular">Claude Opus</div>
+        <div class="sub">claude-opus</div>
+        <div class="chips"><span class="chip">ANTHROPIC</span><span class="chip oidc">OIDC</span></div>
       </div>
     </div>
     <hr />
     <div class="footer">
-      <button>Sync</button>
-      <button>Refresh</button>
+      <button class="mini">Sync</button>
+      <button class="mini">Refresh</button>
+      <button class="mini">Attribution…</button>
       <div class="spacer"></div>
-      <button>Quit</button>
+      <button class="mini">Quit</button>
     </div>
   </div>
+</template>
+<template id="attribution">
+  <div class="panel">
+    <div class="sheet">
+      <h2>Cost attribution</h2>
+      <p class="help">Tags Kong AI cost management reports for Claude Code: some Claude Code sends itself, the rest come from headers you add. Saved for environment “Acme Demo”.</p>
+      <div class="check"><span class="ok">☑</span> Enable attribution</div>
+      <div class="card">
+        <div class="k">SENT BY CLAUDE CODE AUTOMATICALLY</div>
+        <p class="help">Claude Code sends these itself; nothing to configure. Two need the hint toggle below.</p>
+        <div class="rowline"><span class="ok">✓</span> Agent session</div>
+        <div class="rowline"><span class="ok">✓</span> Agent ID</div>
+        <div class="rowline"><span class="ok">✓</span> Parent agent</div>
+        <div class="rowline"><span class="ok">✓</span> Agent request kind <span class="chip">hint headers</span></div>
+        <div class="rowline"><span class="ok">✓</span> Agent type <span class="chip">hint headers</span></div>
+        <div class="check"><span class="ok">☑</span> Send gateway hint headers</div>
+      </div>
+      <div class="card">
+        <div class="k">FROM THE HEADERS YOU ADD</div>
+        <div class="field"><div class="lab">Source control provider <span class="hdr">ai-cost-scm-provider</span></div><div class="box">github</div></div>
+        <div class="field"><div class="lab">Repository <span class="hdr">ai-cost-scm-repository</span></div><div class="box">Auto from git</div></div>
+        <div class="field"><div class="lab">Branch <span class="hdr">ai-cost-scm-branch</span></div><div class="box">Auto from git</div></div>
+      </div>
+      <div class="card">
+        <div class="k">ADDITIONAL HEADERS</div>
+        <div class="field"><div class="lab">Project <span class="hdr">ai-cost-project</span></div><div class="box">payments-api</div></div>
+        <div class="field"><div class="lab">Custom headers</div><div class="box">ai-cost-team · platform</div></div>
+      </div>
+      <div class="card">
+        <div class="k">PREVIEW</div>
+        <div class="mono">ai-cost-scm-provider: github<br>ai-cost-project: payments-api<br>ai-cost-team: platform<br>CLAUDE_CODE_GATEWAY_HINT_HEADERS=1</div>
+      </div>
+      <div class="actions"><button class="mini">Cancel</button><div class="spacer"></div><button class="mini">Save</button></div>
+    </div>
+  </div>
+</template>
+<template id="sso">
+  <div class="panel">
+    <div class="sheet">
+      <h2>Enter credential</h2>
+      <p class="help">Paste a fresh OIDC bearer token for Claude Opus. It is used once and not stored. Or sign in with your IdP in the browser.</p>
+      <div class="seg"><span>API key</span><span class="on">OIDC token</span></div>
+      <div class="card">
+        <div class="k">OPENID CONNECT</div>
+        <div class="sub">Issuer https://idp.acme.example/realms/kong</div>
+        <div class="sub">Sends Authorization: Bearer. Not saved to the Keychain.</div>
+      </div>
+      <button class="primary">Sign in with browser</button>
+      <p class="help" style="margin-top:10px">Opens your IdP (PKCE → http://127.0.0.1:53180/callback). Or paste a bearer token:</p>
+      <div class="box">••••••••</div>
+      <p class="help">Not stored: OIDC tokens expire, and a stale one fails mid-session.</p>
+      <div class="actions"><button class="mini">Cancel</button><div class="spacer"></div><button class="mini">Switch</button></div>
+    </div>
+  </div>
+</template>
+<template id="idp">
+  <div class="sso">
+    <div class="sso-bar">
+      <div class="brand">Acme Identity</div>
+      <h1>Sign in</h1>
+    </div>
+    <div class="sso-body">
+      <div class="consent">
+        <strong>Kong AI Switch</strong>
+        wants to sign you in through Acme Identity. After you approve, the browser returns to Claude Desktop’s loopback
+        <span class="mono">http://127.0.0.1:53180/callback</span>.
+      </div>
+      <label class="l">Username</label>
+      <input class="fake" value="ada@acme.example" readonly />
+      <label class="l">Password</label>
+      <input class="fake" value="••••••••••" readonly />
+      <button class="go">Sign in</button>
+      <div class="fine">Single sign-on for the OIDC strategy on this AI Model. The token is used for this switch and is not stored.</div>
+    </div>
+  </div>
+</template>
+<template id="desktop">
+  <div class="panel">
+    <div class="sheet">
+      <h2>Claude Desktop</h2>
+      <p class="help">Options written into Claude Desktop’s configLibrary profile. Interactive OIDC never includes an API key.</p>
+      <div class="card">
+        <div class="k">CREDENTIAL</div>
+        <div class="seg"><span>Static JWT</span><span class="on">Interactive OIDC</span></div>
+        <p class="help">Writes interactive OIDC only — Claude Desktop runs browser login.</p>
+      </div>
+      <div class="card">
+        <div class="k">OIDC CLIENT</div>
+        <div class="field"><div class="lab">Entra Client ID</div><div class="box">Application (client) ID GUID</div></div>
+        <div class="field"><div class="lab">Other IdPs (optional)</div><div class="box">claude-desktop</div></div>
+        <div class="field"><div class="lab">Redirect port</div><div class="box">53180</div></div>
+      </div>
+      <div class="card">
+        <div class="k">OIDC (INTERACTIVE PROFILE)</div>
+        <div class="field"><div class="lab">Scopes</div><div class="box">openid profile email</div></div>
+        <div class="field"><div class="lab">Bearer token</div><div class="box">access_token</div></div>
+        <div class="field"><div class="lab">Auth flow</div><div class="box">browser</div></div>
+        <div class="check"><span class="ok">☑</span> Append offline_access</div>
+      </div>
+      <div class="actions"><button class="mini">Cancel</button><div class="spacer"></div><button class="mini">Save</button></div>
+    </div>
+  </div>
+</template>
+<script>
+  const name = new URLSearchParams(location.search).get("view") || "menu";
+  const tpl = document.getElementById(name) || document.getElementById("menu");
+  document.getElementById("view").replaceWith(tpl.content.cloneNode(true));
+  document.title = "Kong AI Switch — " + name;
+</script>
 </body>
 </html>
