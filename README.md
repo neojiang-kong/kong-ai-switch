@@ -2,13 +2,18 @@
 
 Switch Claude Code, Claude Desktop, Codex, and Cursor Private Inference between the models your **Kong AI Gateway 2.0** serves, using Kong as the source of truth for what you are allowed to use.
 
-<p align="center">
-  <img src="docs/images/menu-panel.png" alt="Kong AI Switch menu bar panel, with Attribution and the current agents" width="220" /><br>
-  <img src="docs/images/attribution.png" alt="Cost attribution for Claude Code" width="220" /><br>
-  <img src="docs/images/sso.png" alt="OIDC credential sheet with Sign in with browser" width="220" /><br>
-  <img src="docs/images/idp.png" alt="IdP single sign-on page opened by browser login" width="220" /><br>
-  <img src="docs/images/desktop.png" alt="Claude Desktop interactive OIDC settings" width="220" />
-</p>
+<table align="center">
+  <tr>
+    <td><img src="docs/images/menu-panel.png" alt="Kong AI Switch menu bar panel, with Attribution and the current agents" width="200" /></td>
+    <td><img src="docs/images/attribution.png" alt="Cost attribution for Claude Code" width="200" /></td>
+    <td><img src="docs/images/sso.png" alt="OIDC credential sheet with Sign in with browser" width="200" /></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/idp.png" alt="IdP single sign-on page opened by browser login" width="200" /></td>
+    <td><img src="docs/images/desktop.png" alt="Claude Desktop interactive OIDC settings" width="200" /></td>
+    <td></td>
+  </tr>
+</table>
 
 Inspired by [cc-switch](https://github.com/farion1231/cc-switch), which switches Claude Code between API vendors using a local list of providers. This tool replaces that local list with a live sync from Kong: the models you can switch to are the AI Models your platform team has published, with their policies, budgets and credentials already attached.
 
