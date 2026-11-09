@@ -9,6 +9,7 @@
  */
 
 import process from "node:process";
+import { homedir } from "node:os";
 import { readFile, writeFile } from "node:fs/promises";
 import { KongAiGatewayClient, KongApiError, KONNECT_REGIONS, fetchOrganization, slugifyEnvironmentName } from "../kong/client.js";
 import { buildProfiles, gatewayOrigin } from "../kong/models.js";
@@ -55,6 +56,10 @@ import {
   applyClaudeAttribution,
   applyCodexAttribution,
   claudeCredentialHeader,
+  detectInstall,
+  describeAgent,
+  formatAgentsTable,
+  notSwitchableMessage,
 } from "../config/agents.js";
 import {
   ATTRIBUTION_AGENTS,
@@ -100,7 +105,7 @@ Models:
   kong-ai-switch credential set <model> --token <key> [--env <name>]
   kong-ai-switch credential clear <model> [--env <name>]
   kong-ai-switch credential show <model> [--env <name>]
-  kong-ai-switch agents                                 which agents, and where they point
+  kong-ai-switch agents                                 which agents are installed, and where they point
   kong-ai-switch status
 
 Cost attribution (Claude Code or Codex, stored per environment and agent):
@@ -1336,6 +1341,25 @@ async function cmdList(flags) {
 }
 
 async function cmdUse(positional, flags) {
+  // Refuse unknown and detected-only agents before reading an environment or
+  // writing any file. A mixed list must not half-apply.
+  const requestedAgents = flags.agent
+    ? String(flags.agent).split(",").map((a) => a.trim()).filter(Boolean)
+    : ["claude-code"];
+  const resolvedAgents = [];
+  for (const agentId of requestedAgents) {
+    let agent;
+    try {
+      agent = getAgent(agentId);
+    } catch (cause) {
+      throw new UserError(cause.message);
+    }
+    if (agent.switchable === false) {
+      throw new UserError(notSwitchableMessage(agent));
+    }
+    resolvedAgents.push(agent);
+  }
+
   const { env } = await activeEnvironment(flags);
   const state = await readState();
   const entry = environmentState(state, env.name);
@@ -1347,21 +1371,9 @@ async function cmdUse(positional, flags) {
   const { profile, error } = resolveProfile(entry.profiles, positional[0]);
   if (error) throw new UserError(error);
 
-  // Which coding agents to point at this model. Default to Claude Code so
-  // existing behaviour is unchanged; --agent may be repeated or comma-listed.
-  const requestedAgents = flags.agent
-    ? String(flags.agent).split(",").map((a) => a.trim()).filter(Boolean)
-    : ["claude-code"];
-
   // Check every requested agent against the model's format before writing
   // anything, so a two-agent switch cannot half-apply.
-  for (const agentId of requestedAgents) {
-    let agent;
-    try {
-      agent = getAgent(agentId);
-    } catch (cause) {
-      throw new UserError(cause.message);
-    }
+  for (const agent of resolvedAgents) {
     if (!agent.formats.includes(profile.format)) {
       throw new UserError(
         `${agent.name} cannot call "${profile.name}": it serves the "${profile.format}" format, ` +
@@ -1418,10 +1430,11 @@ async function cmdUse(positional, flags) {
     typeof flags["oidc-client-id"] === "string" ? flags["oidc-client-id"] : undefined;
 
   const applied = [];
-  for (const agentId of requestedAgents) {
-    const agent = getAgent(agentId);
+  for (const agent of resolvedAgents) {
+    const agentId = agent.id;
     // Claude Desktop shares Claude Code's file; writing twice is wasted work.
     if (agent.sharesConfigWith && requestedAgents.includes(agent.sharesConfigWith)) continue;
+    if (agent.switchable === false) continue;
     try {
       const desktopOpts =
         agentId === "claude-desktop"
@@ -1569,23 +1582,14 @@ function describeMissingCredential(profile, auth, envName) {
   return lines.join("\n");
 }
 
-/** List the coding agents this tool can configure, and where each points. */
+/** List known coding agents, whether each is installed, and where switchable ones point. */
 async function cmdAgents(flags = {}) {
+  const home = homedir();
   const rows = [];
   for (const agent of listAgents()) {
-    const status = await agentStatus(agent.id);
-    rows.push({
-      id: agent.id,
-      name: agent.name,
-      vendor: agent.vendor ?? null,
-      formats: agent.formats,
-      file: status.file,
-      configured: status.configured,
-      model: status.model ?? null,
-      baseUrl: status.baseUrl ?? null,
-      sharesConfigWith: agent.sharesConfigWith ?? null,
-      envFile: status.envFile ?? null,
-    });
+    const status = await agentStatus(agent.id, { home });
+    const install = await detectInstall(agent, { home });
+    rows.push(describeAgent(agent, status, install));
   }
 
   if (flags.json) {
@@ -1593,16 +1597,7 @@ async function cmdAgents(flags = {}) {
     return;
   }
 
-  const width = (key, header) => Math.max(...rows.map((r) => String(r[key]).length), header.length);
-  const wId = width("id", "AGENT");
-  const wName = width("name", "NAME");
-
-  process.stdout.write(`  ${"AGENT".padEnd(wId)}  ${"NAME".padEnd(wName)}  POINTED AT\n`);
-  for (const r of rows) {
-    const target = r.configured ? (r.model ?? "configured") : "not configured";
-    process.stdout.write(`  ${r.id.padEnd(wId)}  ${r.name.padEnd(wName)}  ${target}\n`);
-  }
-  process.stdout.write('\nSwitch one or more with: kong-ai-switch use <model> --agent codex\n');
+  process.stdout.write(formatAgentsTable(rows));
 }
 
 async function cmdStatus(flags = {}) {

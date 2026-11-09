@@ -235,7 +235,8 @@ public struct StatusResult: Codable, Sendable {
     public let gateway: String?
 }
 
-/// A coding agent that can be pointed at a Kong AI Gateway.
+/// A coding agent the menu can show. Switchable agents can be pointed at a
+/// Kong AI Gateway. Hermes and OpenClaw are detected only.
 public struct Agent: Codable, Identifiable, Hashable, Sendable {
     public let id: String
     public let name: String
@@ -251,9 +252,61 @@ public struct Agent: Codable, Identifiable, Hashable, Sendable {
     public let sharesConfigWith: String?
     /// Extra env file Copilot needs sourced before launch.
     public let envFile: String?
+    /// False when the product itself is not on this Mac.
+    /// Missing from older CLI JSON, which is treated as installed so those stubs still decode.
+    public let installed: Bool
+    /// Path of the binary or app that counted as an install, when there is one.
+    public let foundAt: String?
+    /// False for detected-only agents. Missing from older CLI JSON, which stays switchable.
+    public let switchable: Bool
 
     public var statusLabel: String {
-        configured ? (model ?? "configured") : "not set"
+        if !switchable {
+            return installed ? "installed · not switchable yet" : "not installed"
+        }
+        if !installed {
+            return "not installed"
+        }
+        return configured ? (model ?? "configured") : "not set"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, vendor, formats, file, configured, model, baseUrl
+        case sharesConfigWith, envFile, installed, foundAt, switchable
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        vendor = try c.decodeIfPresent(String.self, forKey: .vendor)
+        formats = try c.decode([String].self, forKey: .formats)
+        file = try c.decode(String.self, forKey: .file)
+        configured = try c.decode(Bool.self, forKey: .configured)
+        model = try c.decodeIfPresent(String.self, forKey: .model)
+        baseUrl = try c.decodeIfPresent(String.self, forKey: .baseUrl)
+        sharesConfigWith = try c.decodeIfPresent(String.self, forKey: .sharesConfigWith)
+        envFile = try c.decodeIfPresent(String.self, forKey: .envFile)
+        installed = try c.decodeIfPresent(Bool.self, forKey: .installed) ?? true
+        foundAt = try c.decodeIfPresent(String.self, forKey: .foundAt)
+        switchable = try c.decodeIfPresent(Bool.self, forKey: .switchable) ?? true
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encodeIfPresent(vendor, forKey: .vendor)
+        try c.encode(formats, forKey: .formats)
+        try c.encode(file, forKey: .file)
+        try c.encode(configured, forKey: .configured)
+        try c.encodeIfPresent(model, forKey: .model)
+        try c.encodeIfPresent(baseUrl, forKey: .baseUrl)
+        try c.encodeIfPresent(sharesConfigWith, forKey: .sharesConfigWith)
+        try c.encodeIfPresent(envFile, forKey: .envFile)
+        try c.encode(installed, forKey: .installed)
+        try c.encodeIfPresent(foundAt, forKey: .foundAt)
+        try c.encode(switchable, forKey: .switchable)
     }
 }
 

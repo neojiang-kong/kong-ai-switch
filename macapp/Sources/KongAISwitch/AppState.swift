@@ -784,6 +784,10 @@ final class AppState: ObservableObject {
     /// Re-lists so each model's `active` flag matches this agent.
     func selectAgent(_ id: String) {
         guard id != selectedAgentId else { return }
+        // Detected-only rows stay visible, but they must not scope the model list.
+        if let agent = agents.first(where: { $0.id == id }), !agent.switchable {
+            return
+        }
         selectedAgentId = id
         refresh()
     }
@@ -1032,7 +1036,7 @@ final class AppState: ObservableObject {
 private func repointAgents(cli: KongCLI, environment: String) {
     let agents = (try? cli.listAgents()) ?? []
     let models = (try? cli.listModels(environment: environment, agent: nil))?.profiles ?? []
-    for agent in agents where agent.configured {
+    for agent in agents where agent.configured && agent.switchable {
         guard let modelId = agent.model, !modelId.isEmpty else { continue }
         guard
             let profile = models.first(where: {

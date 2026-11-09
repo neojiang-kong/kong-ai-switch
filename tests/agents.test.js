@@ -8,9 +8,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, readFile, mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { mkdtemp, writeFile, readFile, mkdir, readdir } from "node:fs/promises";
+import { tmpdir, homedir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import {
   listAgents,
   getAgent,
@@ -21,6 +24,9 @@ import {
   applyCursorLocalEnv,
   setCursorUserEnv,
   buildClaudeDesktopProfile,
+  detectInstall,
+  describeAgent,
+  formatAgentsTable,
 } from "../src/config/agents.js";
 
 const anthropicProfile = {
@@ -51,10 +57,18 @@ test("the known agents are listed with their formats", () => {
   assert.ok(ids.includes("codex"));
   assert.ok(ids.includes("github-copilot"));
   assert.ok(ids.includes("cursor"));
+  assert.ok(ids.includes("hermes"));
+  assert.ok(ids.includes("openclaw"));
   assert.deepEqual(getAgent("claude-code").formats, ["anthropic"]);
   assert.deepEqual(getAgent("codex").formats, ["openai"]);
   assert.deepEqual(getAgent("github-copilot").formats, ["openai", "anthropic"]);
   assert.deepEqual(getAgent("cursor").formats, ["openai", "anthropic"]);
+  assert.equal(getAgent("claude-code").switchable, true);
+  assert.equal(getAgent("hermes").switchable, false);
+  assert.equal(getAgent("openclaw").switchable, false);
+  assert.equal(getAgent("hermes").vendor, "nous");
+  assert.equal(getAgent("openclaw").vendor, "openclaw");
+  assert.deepEqual(getAgent("hermes").formats, ["openai"]);
 });
 
 test("an unknown agent names the ones that exist", () => {
@@ -896,4 +910,375 @@ test("malformed JSON is refused rather than overwritten", async () => {
 
   await assert.rejects(() => applyToAgent("claude-code", anthropicProfile, { home }), /not valid JSON/);
   assert.equal(await readFile(file, "utf8"), "{ broken");
+});
+
+// ---------------------------------------------------------------------------
+// Install detection. The filesystem is injected so these never stat ~/.
+// ---------------------------------------------------------------------------
+
+const REAL_HOME = homedir();
+const FAKE_HOME = "/tmp/kong-ai-switch-detect";
+const execFileAsync = promisify(execFile);
+const cliPath = fileURLToPath(new URL("../src/cli/index.js", import.meta.url));
+
+function lookupDouble({ entries = {}, plists = {}, dirs = {} } = {}) {
+  const calls = [];
+  const guard = (file) => {
+    calls.push(file);
+    if (file === REAL_HOME || file.startsWith(`${REAL_HOME}${path.sep}`)) {
+      throw new Error(`lookup touched the real home: ${file}`);
+    }
+  };
+  return {
+    calls,
+    async stat(file) {
+      guard(file);
+      const kind = entries[file];
+      if (!kind) return null;
+      return {
+        isFile: () => kind === "file",
+        isDirectory: () => kind === "dir",
+      };
+    },
+    async readFile(file) {
+      guard(file);
+      if (!Object.hasOwn(plists, file)) {
+        const error = new Error(`ENOENT: ${file}`);
+        error.code = "ENOENT";
+        throw error;
+      }
+      const body = plists[file];
+      return Buffer.isBuffer(body) ? body : Buffer.from(body);
+    },
+    async listDir(dir) {
+      guard(dir);
+      return dirs[dir] ?? [];
+    },
+  };
+}
+
+function plistXml(bundleId) {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${bundleId}</string></dict></plist>`
+  );
+}
+
+async function detect(id, spec = {}) {
+  const fs = lookupDouble(spec);
+  const found = await detectInstall(id, {
+    home: spec.home ?? FAKE_HOME,
+    platform: spec.platform ?? "darwin",
+    pathEnv: spec.pathEnv ?? "",
+    stat: fs.stat,
+    readFile: fs.readFile,
+    listDir: fs.listDir,
+  });
+  return { ...found, calls: fs.calls };
+}
+
+async function runCli(args, home) {
+  try {
+    const out = await execFileAsync(process.execPath, [cliPath, ...args], {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    return { code: 0, stdout: out.stdout ?? "", stderr: out.stderr ?? "" };
+  } catch (error) {
+    return {
+      code: typeof error.code === "number" ? error.code : 1,
+      stdout: error.stdout ?? "",
+      stderr: error.stderr ?? "",
+    };
+  }
+}
+
+test("a binary on the explicit search path counts, ahead of PATH and config files", async () => {
+  const home = FAKE_HOME;
+  const found = await detect("claude-code", {
+    home,
+    pathEnv: "/custom/bin",
+    entries: {
+      "/opt/homebrew/bin/claude": "file",
+      "/usr/local/bin/claude": "file",
+      [path.join(home, ".local", "bin", "claude")]: "file",
+      "/custom/bin/claude": "file",
+      [path.join(home, ".claude", "settings.json")]: "file",
+    },
+  });
+  assert.equal(found.installed, true);
+  assert.equal(found.foundAt, "/opt/homebrew/bin/claude");
+});
+
+test("Claude Code's native installer counts when no binary is on the search path", async () => {
+  const home = FAKE_HOME;
+  const local = path.join(home, ".claude", "local");
+  const found = await detect("claude-code", {
+    home,
+    entries: {
+      [local]: "dir",
+      [path.join(home, ".claude", "settings.json")]: "file",
+    },
+  });
+  assert.equal(found.foundAt, local);
+});
+
+test("version-manager shims are searched before PATH", async () => {
+  const home = FAKE_HOME;
+  const nvmRoot = path.join(home, ".nvm", "versions", "node");
+  const newest = path.join(nvmRoot, "v22.11.0", "bin", "codex");
+  const found = await detect("codex", {
+    home,
+    pathEnv: "/custom/bin",
+    entries: {
+      [newest]: "file",
+      [path.join(nvmRoot, "v20.0.0", "bin", "codex")]: "file",
+      "/custom/bin/codex": "file",
+      [path.join(home, ".codex", "config.toml")]: "file",
+    },
+    dirs: { [nvmRoot]: ["v20.0.0", "v22.11.0"] },
+  });
+  assert.equal(found.foundAt, newest);
+
+  const asdf = path.join(home, ".asdf", "shims", "codex");
+  assert.equal((await detect("codex", { home, entries: { [asdf]: "file" } })).foundAt, asdf);
+
+  const fnm = path.join(home, ".fnm", "current", "bin", "claude");
+  assert.equal((await detect("claude-code", { home, entries: { [fnm]: "file" } })).foundAt, fnm);
+
+  const volta = path.join(home, ".volta", "bin", "copilot");
+  assert.equal((await detect("github-copilot", { home, entries: { [volta]: "file" } })).foundAt, volta);
+});
+
+test("PATH is used only after the explicit directories miss", async () => {
+  const home = FAKE_HOME;
+  const found = await detect("github-copilot", {
+    home,
+    pathEnv: "/custom/bin",
+    entries: {
+      "/custom/bin/copilot": "file",
+      [path.join(home, ".copilot", "settings.json")]: "file",
+      [path.join(home, ".copilot", "kong-ai-switch.env")]: "file",
+    },
+  });
+  assert.equal(found.installed, true);
+  assert.equal(found.foundAt, "/custom/bin/copilot");
+});
+
+test("Claude Desktop is Claude.app with the Anthropic bundle id", async () => {
+  const home = FAKE_HOME;
+  const app = "/Applications/Claude.app";
+  const plistPath = path.join(app, "Contents", "Info.plist");
+  const library = path.join(home, "Library", "Application Support", "Claude-3p", "configLibrary");
+  const found = await detect("claude-desktop", {
+    home,
+    entries: { [app]: "dir", [plistPath]: "file", [library]: "dir" },
+    plists: { [plistPath]: plistXml("com.anthropic.claudefordesktop") },
+  });
+  assert.equal(found.foundAt, app);
+
+  const wrong = await detect("claude-desktop", {
+    home,
+    entries: { [app]: "dir", [plistPath]: "file" },
+    plists: { [plistPath]: plistXml("com.example.not-claude") },
+  });
+  assert.equal(wrong.installed, false);
+  assert.equal(wrong.foundAt, null);
+
+  const userApp = path.join(home, "Applications", "Claude.app");
+  const userPlist = path.join(userApp, "Contents", "Info.plist");
+  const binaryPlist = Buffer.concat([
+    Buffer.from("bplist00"),
+    Buffer.from("CFBundleIdentifier"),
+    Buffer.from("com.anthropic.claudefordesktop"),
+  ]);
+  const atHome = await detect("claude-desktop", {
+    home,
+    entries: { [userApp]: "dir", [userPlist]: "file" },
+    plists: { [userPlist]: binaryPlist },
+  });
+  assert.equal(atHome.foundAt, userApp);
+});
+
+test("config files this tool writes do not count as an install", async () => {
+  const home = FAKE_HOME;
+  const entries = {
+    [path.join(home, ".claude", "settings.json")]: "file",
+    [path.join(home, "Library", "Application Support", "Claude-3p", "configLibrary")]: "dir",
+    [path.join(home, ".codex", "config.toml")]: "file",
+    [path.join(home, ".copilot", "settings.json")]: "file",
+    [path.join(home, ".copilot", "kong-ai-switch.env")]: "file",
+    [path.join(home, ".kong-ai-switch", "cursor-local.env")]: "file",
+    [path.join(home, ".hermes")]: "dir",
+    [path.join(home, ".hermes", "config.yaml")]: "file",
+    [path.join(home, ".openclaw", "openclaw.json")]: "file",
+  };
+  for (const id of [
+    "claude-code",
+    "claude-desktop",
+    "codex",
+    "github-copilot",
+    "cursor",
+    "hermes",
+    "openclaw",
+  ]) {
+    const found = await detect(id, { home, entries });
+    assert.equal(found.installed, false, id);
+    assert.equal(found.foundAt, null, id);
+  }
+});
+
+test("stock Cursor paths are not Cursor Private Inference", async () => {
+  const cursor = getAgent("cursor");
+  assert.deepEqual(cursor.install.ignoreBinaries, ["cursor", "cursor-agent"]);
+  assert.deepEqual(cursor.install.ignoreApps, ["Cursor.app"]);
+  assert.match(cursor.install.note, /No stable public install path/);
+  const home = FAKE_HOME;
+  const found = await detect("cursor", {
+    home,
+    entries: {
+      "/Applications/Cursor.app": "dir",
+      [path.join(home, "Applications", "Cursor.app")]: "dir",
+      "/opt/homebrew/bin/cursor": "file",
+      "/usr/local/bin/cursor-agent": "file",
+      [path.join(home, ".local", "bin", "cursor")]: "file",
+      [path.join(home, ".kong-ai-switch", "cursor-local.env")]: "file",
+    },
+  });
+  assert.equal(found.installed, false);
+  assert.equal(found.foundAt, null);
+});
+
+test("Hermes is the binary, the hermes-agent checkout, or the app — not the data dir", async () => {
+  const home = FAKE_HOME;
+  const bin = path.join(home, ".local", "bin", "hermes");
+  assert.equal(
+    (await detect("hermes", { home, entries: { [bin]: "file", [path.join(home, ".hermes")]: "dir" } })).foundAt,
+    bin,
+  );
+
+  const checkout = path.join(home, ".hermes", "hermes-agent");
+  assert.equal(
+    (await detect("hermes", { home, entries: { [checkout]: "dir", [path.join(home, ".hermes")]: "dir" } })).foundAt,
+    checkout,
+  );
+
+  const app = path.join(home, "Applications", "Hermes.app");
+  assert.equal((await detect("hermes", { home, entries: { [app]: "dir" } })).foundAt, app);
+
+  const linux = await detect("hermes", { home, platform: "linux", entries: { [app]: "dir" } });
+  assert.equal(linux.installed, false);
+
+  const prev = process.env.HERMES_HOME;
+  const relocated = "/tmp/kong-ai-switch-hermes-home";
+  process.env.HERMES_HOME = relocated;
+  try {
+    const found = await detect("hermes", {
+      home,
+      entries: {
+        [relocated]: "dir",
+        [path.join(home, ".hermes")]: "dir",
+        [path.join(home, ".hermes", "config.yaml")]: "file",
+      },
+    });
+    assert.equal(found.installed, false);
+    assert.equal(found.calls.includes(relocated), false);
+  } finally {
+    if (prev === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = prev;
+  }
+});
+
+test("OpenClaw is the binary or ~/.openclaw, not OPENCLAW_CONFIG_PATH", async () => {
+  const home = FAKE_HOME;
+  const bin = "/usr/local/bin/openclaw";
+  assert.equal((await detect("openclaw", { home, entries: { [bin]: "file" } })).foundAt, bin);
+
+  const root = path.join(home, ".openclaw");
+  assert.equal((await detect("openclaw", { home, entries: { [root]: "dir" } })).foundAt, root);
+
+  const prev = process.env.OPENCLAW_CONFIG_PATH;
+  const decoy = "/tmp/kong-ai-switch-openclaw.json";
+  process.env.OPENCLAW_CONFIG_PATH = decoy;
+  try {
+    const found = await detect("openclaw", {
+      home,
+      entries: {
+        [decoy]: "file",
+        [path.join(home, ".openclaw", "openclaw.json")]: "file",
+      },
+    });
+    assert.equal(found.installed, false);
+    assert.equal(found.foundAt, null);
+    assert.equal(found.calls.includes(decoy), false);
+  } finally {
+    if (prev === undefined) delete process.env.OPENCLAW_CONFIG_PATH;
+    else process.env.OPENCLAW_CONFIG_PATH = prev;
+  }
+});
+
+test("agents text and json report installed, foundAt, and switchable", () => {
+  const rows = [
+    describeAgent(
+      getAgent("claude-code"),
+      { file: "/x/.claude/settings.json", configured: true, model: "my-claude", baseUrl: "http://gw" },
+      { installed: true, foundAt: "/opt/homebrew/bin/claude" },
+    ),
+    describeAgent(
+      getAgent("codex"),
+      { file: "/x/.codex/config.toml", configured: false },
+      { installed: false, foundAt: null },
+    ),
+    describeAgent(
+      getAgent("hermes"),
+      { file: "/x/.hermes/hermes-agent", configured: false },
+      { installed: true, foundAt: "/x/.local/bin/hermes" },
+    ),
+  ];
+  assert.equal(rows[0].installed, true);
+  assert.equal(rows[0].foundAt, "/opt/homebrew/bin/claude");
+  assert.equal(rows[0].switchable, true);
+  assert.equal(rows[0].model, "my-claude");
+  assert.equal(rows[1].installed, false);
+  assert.equal(rows[1].foundAt, null);
+  assert.equal(rows[2].switchable, false);
+  const text = formatAgentsTable(rows);
+  assert.match(text, /not installed/);
+  assert.match(text, /my-claude/);
+  assert.match(text, /not switchable/);
+});
+
+test("detected-only agents are not offered as switch targets", () => {
+  const { supported, unsupported } = agentsForModel("openai");
+  assert.equal(supported.some((agent) => agent.id === "hermes" || agent.id === "openclaw"), false);
+  assert.equal(unsupported.some((agent) => agent.id === "hermes" || agent.id === "openclaw"), false);
+  assert.ok(supported.some((agent) => agent.id === "codex"));
+});
+
+test("hermes and openclaw are detected but use and applyToAgent refuse them", async () => {
+  const home = await scratchHome();
+  await assert.rejects(() => applyToAgent("hermes", openaiProfile, { home }), /not switchable yet/);
+  await assert.rejects(() => applyToAgent("openclaw", openaiProfile, { home }), /not switchable yet/);
+  assert.deepEqual(await readdir(home), []);
+
+  for (const agent of ["hermes", "openclaw"]) {
+    const result = await runCli(["use", "some-model", "--agent", agent], home);
+    assert.notEqual(result.code, 0, result.stderr);
+    assert.match(`${result.stderr}\n${result.stdout}`, /not switchable yet/);
+  }
+
+  const mixed = await runCli(["use", "some-model", "--agent", "hermes,claude-code"], home);
+  assert.notEqual(mixed.code, 0);
+  assert.match(mixed.stderr, /not switchable yet/);
+
+  const unknown = await runCli(["use", "some-model", "--agent", "emacs"], home);
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.stderr, /Unknown agent/);
+  assert.match(unknown.stderr, /Known agents/);
+
+  assert.deepEqual(await readdir(home), []);
+  await assert.rejects(() => readFile(path.join(home, ".hermes", "config.yaml"), "utf8"), /ENOENT/);
+  await assert.rejects(() => readFile(path.join(home, ".openclaw", "openclaw.json"), "utf8"), /ENOENT/);
+  await assert.rejects(() => readFile(path.join(home, ".claude", "settings.json"), "utf8"), /ENOENT/);
 });

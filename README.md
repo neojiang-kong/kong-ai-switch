@@ -134,7 +134,7 @@ On macOS, tokens go to the login Keychain, so they stay out of your dotfiles and
 | `env export <name>` | Write a shareable definition with no credentials |
 | `env import <file>` | Add a shared definition, optionally renaming with `--name` |
 | `discover --token <pat>` | Find gateways and their proxy URLs from a token alone |
-| `agents` | Which coding agents are known, and where each points |
+| `agents` | Which coding agents are installed, which can be switched, and where each points |
 | `sync` | Pull the model catalogue for an environment |
 | `list` | Show switchable models for an agent. `--agent codex` to scope it, `--all` to include unusable ones, `--json` for scripting |
 | `use <model>` | Point an agent at a model. `--agent codex`, `--agent cursor`, or `--agent claude-code,codex` |
@@ -207,6 +207,10 @@ kong-ai-switch use my-gpt --agent codex
 
 Each agent has its own config file, and only the keys this tool owns are touched. Claude Code uses `~/.claude/settings.json`; Claude Desktop gets its own profile in `~/Library/Application Support/Claude-3p/configLibrary/`; Codex gets a delimited block in `~/.codex/config.toml`, leaving the rest of that file verbatim.
 
+`kong-ai-switch agents` reports `installed`, `foundAt`, and `switchable`. Detection states the binary or `.app` — Homebrew, `~/.local/bin`, nvm, fnm, Volta, asdf, directories already on `PATH`, and on macOS `/Applications` and `~/Applications` — and ignores the config files above. Claude Code is `claude` or `~/.claude/local`. Claude Desktop is `Claude.app` (`com.anthropic.claudefordesktop`). Codex is `codex`. GitHub Copilot is the `copilot` CLI, not the editor extension. Stock Cursor.app, `cursor`, and `cursor-agent` are not Cursor Private Inference, so that row stays not installed until the private build has a path of its own.
+
+Hermes (OpenAI chat completions) and OpenClaw are listed when their own install is present — the `hermes` binary, `~/.hermes/hermes-agent`, or Hermes.app; the `openclaw` binary or `~/.openclaw` — and are not switch targets. `use --agent hermes` or `openclaw` refuses without writing their config. Finding OpenClaw does not mean the CLIs it can launch are installed.
+
 Cursor follows [Magpie](https://github.com/yetone/magpie)'s Cursor Private Inference wiring. That build reads `CURSOR_LOCAL_AGENT_BASE_URL` and `CURSOR_LOCAL_AGENT_API_KEY`; the regular Cursor editor and `cursor-agent` do not. The switch writes those two variables to `~/.kong-ai-switch/cursor-local.env` and, on macOS, sets them for the user session with `launchctl` so an app opened from the Dock sees them. It does not edit `~/.cursor`. Quit Cursor Private Inference completely and open it again. A base URL or API key in its Open configuration overrides the variables. `launchctl` forgets them at logout; the next switch sets them again.
 
 For Claude Code, switching rewrites four keys under `env` and leaves everything else alone:
@@ -242,7 +246,7 @@ Models behind an AI Auth Strategy need a consumer credential, via `--token` or `
 
 ## Scope
 
-Built and verified against the Konnect AI Gateway API (OAS 3.0, spec 2.0.3), for Claude Code, Claude Desktop, Codex CLI, and Cursor Private Inference on Konnect-managed gateways.
+Built and verified against the Konnect AI Gateway API (OAS 3.0, spec 2.0.3), for Claude Code, Claude Desktop, Codex CLI, GitHub Copilot, and Cursor Private Inference on Konnect-managed gateways. `agents` also reports which of those are installed. Hermes and OpenClaw are shown when installed and are not switched.
 
 Not covered: self-hosted Kong Gateway without Konnect, where AI Models do not exist as entities and discovery would mean enumerating `ai-proxy-advanced` plugins through the Admin API. Qwen Code CLI and GitHub Copilot would each reuse the same sync with their own config writer in `src/config/agents.js`.
 

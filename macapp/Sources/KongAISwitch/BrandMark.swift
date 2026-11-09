@@ -106,6 +106,8 @@ struct BrandMark: View {
             case "codex": return "terminal.fill"
             case "github-copilot": return "cat.fill"
             case "cursor": return "cursorarrow.rays"
+            case "hermes": return "brain"
+            case "openclaw": return "ant.fill"
             default:
                 switch vendor {
                 case "anthropic": return "sparkles"

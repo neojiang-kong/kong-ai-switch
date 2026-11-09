@@ -9,6 +9,10 @@
  * Codex speaks OpenAI, so the same AI Model is not usable from both unless
  * the gateway exposes it in the matching format. Offering a switch that would
  * 404 is worse than not offering it, so each agent declares what it accepts.
+ *
+ * `switchable: false` agents are detected only. They appear in `agents` and
+ * in the menu, and `use` refuses them. Detection lives on `install` and
+ * looks for the product, never for a file this tool writes.
  */
 
 import { execFile } from "node:child_process";
@@ -30,6 +34,7 @@ import {
   staticAttributionHeaders,
   usesAutoGit,
 } from "./attribution.js";
+import { detectAgentInstall } from "./install.js";
 
 /** Local Claude Desktop 3P configLibrary root for this OS. */
 export function claudeDesktopLibraryDir(home = homedir()) {
@@ -61,6 +66,12 @@ export const AGENTS = {
       "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT",
       "CLAUDE_CODE_GATEWAY_HINT_HEADERS",
     ],
+    switchable: true,
+    /** `claude` on the usual bin paths, or the native installer at ~/.claude/local. Not settings.json. */
+    install: {
+      binaries: ["claude"],
+      paths: (home) => [path.join(home, ".claude", "local")],
+    },
   },
 
   "claude-desktop": {
@@ -87,6 +98,11 @@ export const AGENTS = {
       "inferenceModels",
       "modelDiscoveryEnabled",
     ],
+    switchable: true,
+    /** Claude.app in /Applications or ~/Applications, confirmed by bundle id. Not configLibrary. */
+    install: {
+      apps: [{ name: "Claude.app", bundleId: "com.anthropic.claudefordesktop" }],
+    },
   },
 
   codex: {
@@ -97,6 +113,11 @@ export const AGENTS = {
     kind: "codex-toml",
     configPath: (home) => path.join(home, ".codex", "config.toml"),
     ownedKeys: ["model_provider", "model", "model_providers.kong"],
+    switchable: true,
+    /** The `codex` binary. The managed block in config.toml is not an install. */
+    install: {
+      binaries: ["codex"],
+    },
   },
 
   /**
@@ -113,6 +134,11 @@ export const AGENTS = {
     configPath: (home) => path.join(home, ".copilot", "settings.json"),
     envPath: (home) => path.join(home, ".copilot", "kong-ai-switch.env"),
     ownedKeys: ["model", "COPILOT_PROVIDER_BASE_URL", "COPILOT_MODEL"],
+    switchable: true,
+    /** The `copilot` CLI binary only. Not the VS Code extension, settings.json, or kong-ai-switch.env. */
+    install: {
+      binaries: ["copilot"],
+    },
   },
 
   /**
@@ -123,6 +149,12 @@ export const AGENTS = {
    * This build reads CURSOR_LOCAL_AGENT_BASE_URL and CURSOR_LOCAL_AGENT_API_KEY
    * instead. On macOS those are set with launchctl so a Dock launch sees them.
    * https://github.com/yetone/magpie/blob/main/internal/agent/cursorlocal.go
+   *
+   * Install detection does not treat stock Cursor as this product. There is
+   * no stable public install path distinct from Cursor.app / `cursor` /
+   * `cursor-agent`, and those do not read CURSOR_LOCAL_AGENT_*. `installed`
+   * stays false for those paths until a private build publishes its own
+   * binary or app name on `install.binaries` / `install.apps`.
    */
   cursor: {
     id: "cursor",
@@ -132,6 +164,61 @@ export const AGENTS = {
     kind: "cursor-local",
     configPath: (home) => path.join(home, ".kong-ai-switch", "cursor-local.env"),
     ownedKeys: ["CURSOR_LOCAL_AGENT_BASE_URL", "CURSOR_LOCAL_AGENT_API_KEY"],
+    switchable: true,
+    install: {
+      binaries: [],
+      apps: [],
+      ignoreBinaries: ["cursor", "cursor-agent"],
+      ignoreApps: ["Cursor.app"],
+      note:
+        "No stable public install path is distinct from stock Cursor. " +
+        "/Applications/Cursor.app, ~/Applications/Cursor.app, the cursor command, and cursor-agent " +
+        "are stock Cursor. They do not read CURSOR_LOCAL_AGENT_* and are not install signals. " +
+        "installed stays false until a private build publishes its own binary or app.",
+    },
+  },
+
+  /**
+   * Nous Research Hermes Agent. Detected only — do not write ~/.hermes/config.yaml.
+   * Protocol is OpenAI chat completions. HERMES_HOME can move the data dir;
+   * the official installer default (~/.local/bin/hermes, ~/.hermes/hermes-agent,
+   * or Hermes.app) is enough. ~/.hermes/ by itself is not an install.
+   */
+  hermes: {
+    id: "hermes",
+    name: "Hermes",
+    vendor: "nous",
+    formats: ["openai"],
+    switchable: false,
+    kind: "detected-only",
+    configPath: (home) => path.join(home, ".hermes", "hermes-agent"),
+    install: {
+      binaries: ["hermes"],
+      paths: (home) => [path.join(home, ".hermes", "hermes-agent")],
+      pathKind: "dir",
+      apps: [{ name: "Hermes.app" }],
+    },
+  },
+
+  /**
+   * OpenClaw, a host that can launch other CLIs. Detected only — one row,
+   * which does not mean Claude, Codex, or any other agent is installed.
+   * Do not write ~/.openclaw/openclaw.json and do not consult OPENCLAW_CONFIG_PATH.
+   * The official installer puts the CLI and state under ~/.openclaw.
+   */
+  openclaw: {
+    id: "openclaw",
+    name: "OpenClaw",
+    vendor: "openclaw",
+    formats: ["openai"],
+    switchable: false,
+    kind: "detected-only",
+    configPath: (home) => path.join(home, ".openclaw"),
+    install: {
+      binaries: ["openclaw"],
+      paths: (home) => [path.join(home, ".openclaw")],
+      pathKind: "dir",
+    },
   },
 };
 
@@ -149,6 +236,72 @@ export function getAgent(id) {
   return agent;
 }
 
+/** Agents `use` is allowed to rewrite. Detected-only rows are omitted. */
+export function listSwitchableAgents() {
+  return listAgents().filter((agent) => agent.switchable !== false);
+}
+
+/** Error for `use` / applyToAgent on a detected-only agent. No config is written. */
+export function notSwitchableMessage(agent) {
+  const name = typeof agent === "string" ? agent : agent.name;
+  return `${name} is detected, not switchable yet.`;
+}
+
+/**
+ * Whether the product is on this machine.
+ * `options.stat` / `options.readFile` / `options.listDir` are injected in tests.
+ * `options.home` is required by the lookup so a test never falls through to a real home.
+ */
+export function detectInstall(agentOrId, options) {
+  const agent = typeof agentOrId === "string" ? getAgent(agentOrId) : agentOrId;
+  return detectAgentInstall(agent, options);
+}
+
+/** One `agents --json` row. Existing fields stay; install fields are added. */
+export function describeAgent(agent, status, install) {
+  return {
+    id: agent.id,
+    name: agent.name,
+    vendor: agent.vendor ?? null,
+    formats: agent.formats,
+    file: status.file,
+    configured: Boolean(status.configured),
+    model: status.model ?? null,
+    baseUrl: status.baseUrl ?? null,
+    sharesConfigWith: agent.sharesConfigWith ?? null,
+    envFile: status.envFile ?? null,
+    installed: Boolean(install?.installed),
+    foundAt: install?.foundAt ?? null,
+    switchable: agent.switchable !== false,
+  };
+}
+
+/** Text table for `kong-ai-switch agents`. */
+export function formatAgentsTable(rows) {
+  const shown = rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    install: row.installed ? "installed" : "not installed",
+    point:
+      row.switchable === false
+        ? "not switchable"
+        : row.configured
+          ? (row.model ?? "configured")
+          : "not configured",
+  }));
+  const width = (key, header) =>
+    Math.max(header.length, ...shown.map((row) => String(row[key]).length));
+  const wId = width("id", "AGENT");
+  const wName = width("name", "NAME");
+  const wInstall = width("install", "INSTALLED");
+  let out = `  ${"AGENT".padEnd(wId)}  ${"NAME".padEnd(wName)}  ${"INSTALLED".padEnd(wInstall)}  POINTED AT\n`;
+  for (const row of shown) {
+    out += `  ${row.id.padEnd(wId)}  ${row.name.padEnd(wName)}  ${row.install.padEnd(wInstall)}  ${row.point}\n`;
+  }
+  out += "\nSwitch one or more with: kong-ai-switch use <model> --agent codex\n";
+  return out;
+}
+
 /** Whether an agent can call a model served in the given Kong format. */
 export function agentSupportsFormat(agentId, format) {
   return getAgent(agentId).formats.includes(String(format ?? "").toLowerCase());
@@ -161,7 +314,7 @@ export function agentSupportsFormat(agentId, format) {
 export function agentsForModel(format) {
   const supported = [];
   const unsupported = [];
-  for (const agent of listAgents()) {
+  for (const agent of listSwitchableAgents()) {
     if (agent.formats.includes(String(format ?? "").toLowerCase())) supported.push(agent);
     else {
       unsupported.push({
@@ -1251,6 +1404,9 @@ export async function applyToAgent(
   } = {},
 ) {
   const agent = getAgent(agentId);
+  if (agent.switchable === false) {
+    throw new Error(notSwitchableMessage(agent));
+  }
   const effective = authKind ? { ...profile, auth: authWithKind(profile.auth, authKind) } : profile;
 
   if (!agent.formats.includes(effective.format)) {

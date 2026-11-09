@@ -51,6 +51,12 @@ enum LiveCheck {
             return "\(list.profiles.count) model(s), \(usable) usable from Claude Code"
         }
 
+        attempt("agents") {
+            let agents = try cli.listAgents()
+            let installed = agents.filter(\.installed).map(\.id).joined(separator: ", ")
+            return "\(agents.count) agent(s); installed: \(installed.isEmpty ? "none" : installed)"
+        }
+
         attempt("status") {
             let status = try cli.status()
             return status.configured

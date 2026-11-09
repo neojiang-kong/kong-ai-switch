@@ -246,11 +246,64 @@ struct MenuView: View {
     /// models in this environment it can actually reach. Showing the count
     /// here means a mismatch is visible before the list turns up empty.
     private func agentSubtitle(_ agent: Agent) -> String {
+        if !agent.switchable {
+            return agent.installed ? "installed · not switchable yet" : "not installed"
+        }
+        if !agent.installed {
+            return "not installed"
+        }
         let scoped = state.modelsForGateway
         let reachable = scoped.filter { agent.formats.contains($0.format) }.count
         let where_ = agent.configured ? (agent.model ?? "configured") : "not set"
         guard !scoped.isEmpty else { return where_ }
         return "\(where_) · \(reachable) model\(reachable == 1 ? "" : "s")"
+    }
+
+    /// One coding-agent row. Switchable rows keep the radio. Detected-only
+    /// rows stay in the list and do not select a model scope.
+    private func agentRow(_ agent: Agent) -> some View {
+        HStack(spacing: 8) {
+            BrandMark(kind: .agent(id: agent.id, vendor: agent.vendor), size: 22)
+            if agent.switchable {
+                Image(
+                    systemName: agent.id == state.selectedAgentId
+                        ? "largecircle.fill.circle" : "circle"
+                )
+                .foregroundStyle(agent.id == state.selectedAgentId ? Color.accentColor : .secondary)
+                .font(.body)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 5) {
+                    Text(agent.name)
+                        .font(
+                            .system(
+                                size: 13,
+                                weight: agent.switchable && agent.id == state.selectedAgentId
+                                    ? .medium : .regular))
+                    ForEach(agent.formats, id: \.self) { format in
+                        MetaChip(text: format.uppercased())
+                    }
+                }
+                Text(agentSubtitle(agent))
+                    .font(.system(size: 11))
+                    .foregroundStyle(agentSubtitleMuted(agent) ? .tertiary : .secondary)
+            }
+            Spacer()
+            if agent.switchable && agent.installed && agent.configured {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.green)
+            }
+        }
+        .contentShape(Rectangle())
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private func agentSubtitleMuted(_ agent: Agent) -> Bool {
+        if !agent.switchable { return !agent.installed }
+        if !agent.installed { return true }
+        return !agent.configured
     }
 
     /// Which coding agent to configure.
@@ -267,45 +320,18 @@ struct MenuView: View {
                 .padding(.top, 8)
 
             ForEach(state.agents) { agent in
-                Button {
-                    state.selectAgent(agent.id)
-                } label: {
-                    HStack(spacing: 8) {
-                        BrandMark(kind: .agent(id: agent.id, vendor: agent.vendor), size: 22)
-                        Image(
-                            systemName: agent.id == state.selectedAgentId
-                                ? "largecircle.fill.circle" : "circle"
-                        )
-                        .foregroundStyle(agent.id == state.selectedAgentId ? Color.accentColor : .secondary)
-                        .font(.body)
-                        VStack(alignment: .leading, spacing: 1) {
-                            HStack(spacing: 5) {
-                                Text(agent.name)
-                                    .font(
-                                        .system(
-                                            size: 13,
-                                            weight: agent.id == state.selectedAgentId ? .medium : .regular))
-                                ForEach(agent.formats, id: \.self) { format in
-                                    MetaChip(text: format.uppercased())
-                                }
-                            }
-                            Text(agentSubtitle(agent))
-                                .font(.system(size: 11))
-                                .foregroundStyle(agent.configured ? .secondary : .tertiary)
-                        }
-                        Spacer()
-                        if agent.configured {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.green)
-                        }
+                if agent.switchable {
+                    Button {
+                        state.selectAgent(agent.id)
+                    } label: {
+                        agentRow(agent)
                     }
-                    .contentShape(Rectangle())
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                    .buttonStyle(.plain)
+                    .help("\(agent.name) speaks \(agent.formats.joined(separator: "/"))")
+                } else {
+                    agentRow(agent)
+                        .help("\(agent.name) is detected, not switchable yet")
                 }
-                .buttonStyle(.plain)
-                .help("\(agent.name) speaks \(agent.formats.joined(separator: "/"))")
             }
             .padding(.bottom, 6)
         }
@@ -448,6 +474,7 @@ struct MenuView: View {
     /// Other agents that could use the models on the selected gateway.
     private var agentsWithModels: [(agent: Agent, count: Int)] {
         state.agents.compactMap { agent in
+            guard agent.switchable else { return nil }
             guard agent.id != state.selectedAgentId else { return nil }
             // Claude Desktop shares Claude Code's file, so offering both is noise.
             if let shared = agent.sharesConfigWith, shared == state.selectedAgentId { return nil }

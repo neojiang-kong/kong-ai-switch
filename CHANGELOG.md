@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.11
+
+### Features
+- **Install detection.** `kong-ai-switch agents` (text and `--json`) reports `installed`, `foundAt`, and `switchable`. The CLI and menu bar look for each product's binary or app — Homebrew, `~/.local/bin`, nvm, fnm, Volta, asdf, directories already on `PATH`, and on macOS `/Applications` and `~/Applications` — and ignore config files this tool writes.
+- Switchable agents stay Claude Code (`claude` or `~/.claude/local`), Claude Desktop (`Claude.app`), Codex (`codex`), GitHub Copilot (the `copilot` CLI), and Cursor Private Inference. Stock Cursor.app, the `cursor` command, and `cursor-agent` stay not installed: they do not read `CURSOR_LOCAL_AGENT_*`, and there is no separate public install path for the private build.
+- **Hermes** and **OpenClaw** are shown when installed and are not switch targets. `use --agent hermes` or `openclaw` refuses and does not write their config. The menu keeps every known agent visible; uninstalled switchable rows say "not installed", and a detected-only row is not a model-list selection.
+
 ## 0.2.10
 
 ### Features

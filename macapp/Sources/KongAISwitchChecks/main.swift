@@ -273,8 +273,50 @@ do {
     checkEqual("a null model decodes as nil", agents[2].model, nil)
     checkEqual("vendor survives", agents[0].vendor, "anthropic")
     checkEqual("Copilot env file survives", agents[3].envFile, "/Users/x/.copilot/kong-ai-switch.env")
+    checkEqual("missing installed defaults to installed", agents[2].installed, true)
+    checkEqual("missing switchable defaults to switchable", agents[2].switchable, true)
+    checkEqual("missing foundAt is nil", agents[2].foundAt, nil)
 } catch {
     check("agent decoding threw: \(error)", false)
+}
+
+let installJSON = """
+{
+  "ok": true,
+  "agents": [
+    {"id":"claude-code","name":"Claude Code","vendor":"anthropic","formats":["anthropic"],
+     "file":"/Users/x/.claude/settings.json","configured":true,"model":"my-claude",
+     "baseUrl":"http://localhost:8000","sharesConfigWith":null,"envFile":null,
+     "installed":true,"foundAt":"/opt/homebrew/bin/claude","switchable":true},
+    {"id":"codex","name":"Codex CLI","vendor":"openai","formats":["openai"],
+     "file":"/Users/x/.codex/config.toml","configured":false,"model":null,
+     "baseUrl":null,"sharesConfigWith":null,"envFile":null,
+     "installed":false,"foundAt":null,"switchable":true},
+    {"id":"hermes","name":"Hermes","vendor":"nous","formats":["openai"],
+     "file":"/Users/x/.hermes/hermes-agent","configured":false,"model":null,
+     "baseUrl":null,"sharesConfigWith":null,"envFile":null,
+     "installed":true,"foundAt":"/Users/x/.local/bin/hermes","switchable":false},
+    {"id":"openclaw","name":"OpenClaw","vendor":"openclaw","formats":["openai"],
+     "file":"/Users/x/.openclaw","configured":false,"model":null,
+     "baseUrl":null,"sharesConfigWith":null,"envFile":null,
+     "installed":false,"foundAt":null,"switchable":false}
+  ]
+}
+"""
+
+do {
+    let agents = try makeCLI(StubRunner(stdout: installJSON)).listAgents()
+    checkEqual("install stub decodes four agents", agents.count, 4)
+    checkEqual("an installed agent keeps its model", agents[0].statusLabel, "my-claude")
+    checkEqual("foundAt survives", agents[0].foundAt, "/opt/homebrew/bin/claude")
+    checkEqual("a missing product says not installed", agents[1].statusLabel, "not installed")
+    checkEqual("a null foundAt decodes as nil", agents[1].foundAt, nil)
+    checkEqual("hermes is installed but not switchable", agents[2].statusLabel, "installed · not switchable yet")
+    checkEqual("hermes switchable is false", agents[2].switchable, false)
+    checkEqual("openclaw is not installed", agents[3].statusLabel, "not installed")
+    checkEqual("openclaw switchable is false", agents[3].switchable, false)
+} catch {
+    check("install-field decoding threw: \(error)", false)
 }
 
 // MARK: - Error handling
